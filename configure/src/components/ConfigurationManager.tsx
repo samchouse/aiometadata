@@ -589,7 +589,12 @@ export function ConfigurationManager() {
             </Callout>
             <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
               {identity && jellyfinEnabled ? (
-                <JellyfinDialog open={showJellyfin} onOpenChange={setShowJellyfin} userUUID={identity.userUUID} />
+                <JellyfinDialog
+                  open={showJellyfin}
+                  onOpenChange={setShowJellyfin}
+                  userUUID={identity.userUUID}
+                  installUrl={identity.installUrl}
+                />
               ) : null}
               <Dialog open={showLoadDialog} onOpenChange={setShowLoadDialog}>
                 <Button
