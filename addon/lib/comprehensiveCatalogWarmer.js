@@ -955,6 +955,44 @@ class ComprehensiveCatalogWarmer {
     return { pages: pagesWarmed, items: totalItems };
   }
 
+  async warmWatchHistory(config, uuid) {
+    const hasTrackerKeys = Boolean(
+      config?.apiKeys?.traktTokenId ||
+      config?.apiKeys?.simklTokenId ||
+      config?.apiKeys?.mdblist ||
+      config?.apiKeys?.publicmetadb ||
+      config?.apiKeys?.anilistTokenId
+    );
+    if (!hasTrackerKeys) return;
+
+    try {
+      this.log('info', `Pre-warming watch history for UUID ${uuid}...`);
+      const startTime = Date.now();
+      const { getBtttrHistory } = require('../utils/btttrHistory');
+      const btttrHistory = await getBtttrHistory(config);
+      config._btttrHistory = btttrHistory;
+
+      const moviesCount = (btttrHistory?.movieImdbIds?.size || 0) + (btttrHistory?.movieTmdbIds?.size || 0);
+      const showsCount = (btttrHistory?.showImdbIds?.size || 0) + (btttrHistory?.showTmdbIds?.size || 0);
+      const progressCount = btttrHistory?.showProgress?.size || 0;
+      const duration = Date.now() - startTime;
+      this.log('success', `✓ Watch history pre-warmed for UUID ${uuid}: ${moviesCount} movies, ${showsCount} shows, ${progressCount} in progress (${duration}ms)`);
+      if (this.stats.uuidStats[uuid]) {
+        this.stats.uuidStats[uuid].watchHistory = {
+          movies: moviesCount,
+          shows: showsCount,
+          progress: progressCount,
+          durationMs: duration,
+        };
+      }
+    } catch (error) {
+      this.log('warn', `✗ Watch history pre-warming failed for UUID ${uuid}: ${error.message}`);
+      if (this.stats.uuidStats[uuid]) {
+        this.stats.uuidStats[uuid].errors.push({ catalog: 'watch_history', error: error.message });
+      }
+    }
+  }
+
   async runWarmup(force = false, options = {}) {
     const { imagesOnly = false } = options;
 
@@ -1069,6 +1107,7 @@ class ComprehensiveCatalogWarmer {
         }
 
         const freshConfig = await loadConfigFromDatabase(uuid);
+        if (freshConfig) freshConfig.userUUID = uuid;
         const enabledCatalogs = userData.enabledCatalogs;
         const config = freshConfig;
 
@@ -1081,6 +1120,9 @@ class ComprehensiveCatalogWarmer {
         }
         try {
           this.log('info', `Processing UUID: ${uuid} (${enabledCatalogs.length} catalogs)`);
+
+          // Pre-warm watch history so trackers and BTTTR history are cached before catalog warming and first user request
+          await this.warmWatchHistory(config, uuid);
 
           let uuidWarmingInterrupted = false;
           for (const catalog of enabledCatalogs) {

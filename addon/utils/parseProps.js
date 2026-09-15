@@ -114,6 +114,7 @@ function resolvePattern(pattern, ids, type, config, extra) {
     '{mdblist_key}': config?.apiKeys?.mdblist || '',
     '{fanart_key}': config?.apiKeys?.fanart || '',
     '{user_agent}': extra?.userAgent || '',
+    '{btttr_history}': extra?.btttrHistory || config?._btttrHistoryValue || '',
   };
 
   // Optional placeholders — resolve to empty string without failing
@@ -123,6 +124,15 @@ function resolvePattern(pattern, ids, type, config, extra) {
   };
 
   let url = pattern;
+  // `{name?fallback}` keeps a pattern usable when a value is unavailable.
+  // Unlike `{name?}`, which has long meant "optional", the text after `?` is
+  // inserted verbatim. This is useful for BTTTR's history parameter, e.g.
+  // `{btttr_history?gr}` when the title is not in any connected history.
+  for (const [placeholder, value] of Object.entries(placeholders)) {
+    const name = placeholder.slice(1, -1);
+    const fallbackPattern = new RegExp(`\\{${name}\\?([^}]*)\\}`, 'g');
+    url = url.replace(fallbackPattern, (_match, fallback) => value || fallback);
+  }
   for (const [placeholder, value] of Object.entries(placeholders)) {
     const optional = `${placeholder.slice(0, -1)}?}`;
     if (url.includes(optional)) {

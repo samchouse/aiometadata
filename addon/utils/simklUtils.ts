@@ -1,7 +1,13 @@
 import { httpGet, httpPost, httpRequest } from "./httpClient.js";
 import { historyPayload, type EpisodeRef } from "./historyPayload";
 import { getMeta } from "../lib/getMeta.js";
-import { cacheWrapMetaSmart, cacheWrapGlobal, classifyResultAllowEmpty } from "../lib/getCache.js";
+import {
+  cacheWrapMetaSmart,
+  cacheWrapGlobal,
+  classifyResultAllowEmpty,
+  readGlobalCache,
+  writeGlobalCache,
+} from "../lib/getCache.js";
 import { UserConfig } from "../types/index.js";
 import * as Utils from "./parseProps.js";
 import { progress } from "framer-motion";
@@ -1473,30 +1479,57 @@ async function fetchSimklListPage(accessToken: string, listId: string, page: num
 
 export interface SimklWatchedIds {
   movieImdbIds: Set<string>;
+  movieTmdbIds: Set<number>;
   showImdbIds: Set<string>;
+  showTmdbIds: Set<number>;
+  showProgress: Record<string, { seen: number; total: number }>;
   malIds: Set<number>;
   anilistIds: Set<number>;
 }
 
+async function lastKnownSimklWatchedIds(tokenHash: string): Promise<SimklWatchedIds | null> {
+  try {
+    const fingerprint = await readGlobalCache(`simkl_watched_ids_latest:v2:${tokenHash}`);
+    const data = fingerprint ? await readGlobalCache(`simkl_watched_ids:v2:${tokenHash}:${fingerprint}`) : null;
+    if (!data) return null;
+    return {
+      movieImdbIds: new Set(data.movieImdbIds || []),
+      movieTmdbIds: new Set(data.movieTmdbIds || []),
+      showImdbIds: new Set(data.showImdbIds || []),
+      showTmdbIds: new Set(data.showTmdbIds || []),
+      showProgress: data.showProgress || {},
+      malIds: new Set(data.malIds || []),
+      anilistIds: new Set(data.anilistIds || []),
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function getSimklWatchedIds(config: any): Promise<SimklWatchedIds | null> {
+  let tokenHash: string | null = null;
   try {
     const token = await getSimklToken(config?.apiKeys?.simklTokenId);
-    const accessToken = token?.access_token;
-    if (!accessToken) return null;
+    if (!token?.access_token) return null;
 
+    const accessToken = token.access_token;
     const types = ['movies', 'shows', 'anime'] as const;
-    const tokenHash = crypto.createHash('sha256').update(accessToken).digest('hex').substring(0, 16);
+    tokenHash = crypto.createHash('sha256').update(accessToken).digest('hex').substring(0, 16);
     const fingerprints = await Promise.all(
-      types.map(type => getSimklActivityFingerprint(accessToken, type, 'completed', config))
+      [...types.map(type => getSimklActivityFingerprint(accessToken, type, 'completed', config)),
+        getSimklActivityFingerprint(accessToken, 'shows', 'watching', config)]
     );
     const fingerprint = crypto.createHash('sha256')
       .update(fingerprints.join('|'))
       .digest('hex')
       .substring(0, 16);
 
-    const watched = await cacheWrapGlobal(`simkl_watched_ids:${tokenHash}:${fingerprint}`, async () => {
+    const watched = await cacheWrapGlobal(`simkl_watched_ids:v2:${tokenHash}:${fingerprint}`, async () => {
       const movieImdbIds: string[] = [];
+      const movieTmdbIds: number[] = [];
       const showImdbIds: string[] = [];
+      const showTmdbIds: number[] = [];
+      const showProgress: Record<string, { seen: number; total: number }> = {};
       const malIds: number[] = [];
       const anilistIds: number[] = [];
 
@@ -1507,10 +1540,14 @@ async function getSimklWatchedIds(config: any): Promise<SimklWatchedIds | null> 
           if (!ids) continue;
 
           const imdb = ids.imdb ? String(ids.imdb).trim() : '';
+          const tmdb = ids.tmdb ? Number(ids.tmdb) : null;
+          const isMovie = type === 'movies'
+            || (type === 'anime' && (item.anime_type === 'movie' || item.anime_type === 'ona'));
           if (imdb) {
-            const isMovie = type === 'movies'
-              || (type === 'anime' && (item.anime_type === 'movie' || item.anime_type === 'ona'));
             (isMovie ? movieImdbIds : showImdbIds).push(imdb.startsWith('tt') ? imdb : `tt${imdb}`);
+          }
+          if (tmdb && Number.isFinite(tmdb) && tmdb > 0) {
+            (isMovie ? movieTmdbIds : showTmdbIds).push(tmdb);
           }
 
           if (type !== 'anime') continue;
@@ -1521,18 +1558,44 @@ async function getSimklWatchedIds(config: any): Promise<SimklWatchedIds | null> 
         }
       }
 
+      const { items: watchingShows } = await fetchSimklWatchlistItems(accessToken, 'shows', 'watching');
+      for (const item of watchingShows) {
+        const ids = item?.show?.ids;
+        const imdb = ids?.imdb ? String(ids.imdb).trim() : '';
+        const tmdb = ids?.tmdb ? Number(ids.tmdb) : null;
+        const seen = Number(item?.watched_episodes_count);
+        const total = Number(item?.total_episodes_count);
+        if (Number.isFinite(seen) && Number.isFinite(total) && seen > 0 && total > 0) {
+          const progress = { seen, total };
+          if (imdb) {
+            showProgress[imdb.startsWith('tt') ? imdb : `tt${imdb}`] = progress;
+          }
+          if (tmdb && tmdb > 0) {
+            showProgress[String(tmdb)] = progress;
+            showProgress[`tmdb:${tmdb}`] = progress;
+          }
+        }
+      }
+
       logger.info(`[Watched IDs] ${movieImdbIds.length} movies, ${showImdbIds.length} shows, ${malIds.length} anime completed on Simkl`);
-      return { movieImdbIds, showImdbIds, malIds, anilistIds };
+      return { movieImdbIds, movieTmdbIds, showImdbIds, showTmdbIds, showProgress, malIds, anilistIds };
     }, SIMKL_WATCHLIST_TTL, { resultClassifier: classifyResultAllowEmpty });
+
+    await writeGlobalCache(`simkl_watched_ids_latest:v2:${tokenHash}`, fingerprint, 86400 * 7);
 
     return {
       movieImdbIds: new Set(watched.movieImdbIds),
+      movieTmdbIds: new Set(watched.movieTmdbIds || []),
       showImdbIds: new Set(watched.showImdbIds),
+      showTmdbIds: new Set(watched.showTmdbIds || []),
+      showProgress: watched.showProgress || {},
       malIds: new Set(watched.malIds),
       anilistIds: new Set(watched.anilistIds),
     };
   } catch (err: any) {
     logger.warn(`[Watched IDs] Error fetching Simkl watched IDs: ${err.message}`);
+    const known = tokenHash ? await lastKnownSimklWatchedIds(tokenHash) : null;
+    if (known) return known;
     return null;
   }
 }
