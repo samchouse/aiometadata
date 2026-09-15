@@ -23,7 +23,7 @@ import { isDiscoverCatalogId, applyDiscoverSignature } from './discoverCatalogSi
 import { getTVDBContentRatingId } from '../utils/tvdbContentRating.js';
 import { getMeta } from './getMeta.js';
 import { resolveDynamicTmdbDiscoverParams } from './tmdbDiscoverDateTokens.js';
-import { roundRobinInterleaveTagged, mergedDedupKey, filterMetasByGenre, normalizeGenreKey } from '../utils/mergedCatalog.js';
+import { roundRobinInterleaveTagged, popularitySortOrRoundRobin, mergedDedupKey, filterMetasByGenre, normalizeGenreKey } from '../utils/mergedCatalog.js';
 const { getTvmazeScheduleCatalog } = require('./tvmazeScheduleCatalog');
 const movielens = require('./movielens');
 
@@ -1085,6 +1085,72 @@ async function getTmdbAndMdbListCatalog(type: string, id: string, genre: string,
       type as 'movie' | 'series'
     );
 
+    const tieredRecency = discoverMetadata?.tieredRecency;
+    const tieredEnabled = tieredRecency?.enabled === true
+      && parameters.sort_by === 'popularity.desc';
+    const tmdbPageSize = 20;
+    let tieredResults: any[] | null = null;
+
+    const fetchDiscoverPage = async (discoverParams: Record<string, any>, discoverPageNumber: number) => {
+      const pageParams = { ...discoverParams, page: discoverPageNumber };
+      const pageResponse = mediaType === 'movie'
+        ? await moviedb.discoverMovie(pageParams, config)
+        : await moviedb.discoverTv(pageParams, config);
+      return Array.isArray(pageResponse?.results) ? pageResponse.results : [];
+    };
+
+    if (tieredEnabled) {
+      const tierCount = Math.min(100, Math.max(1, Math.floor(Number(tieredRecency.tierCount) || 40)));
+      const dateField = mediaType === 'movie' ? 'primary_release_date.gte' : 'first_air_date.gte';
+      const dateToField = mediaType === 'movie' ? 'primary_release_date.lte' : 'first_air_date.lte';
+      const tierOneParams = { ...parameters, sort_by: 'popularity.desc' };
+      const tierTwoParams = { ...parameters, sort_by: 'popularity.desc' };
+      const tieredDateFields = mediaType === 'movie'
+        ? ['primary_release_date.gte', 'primary_release_date.lte', 'release_date.gte', 'release_date.lte']
+        : ['first_air_date.gte', 'first_air_date.lte', 'air_date.gte', 'air_date.lte'];
+      tieredDateFields.forEach((field) => delete tierTwoParams[field]);
+
+      const customReleaseFrom = typeof tieredRecency.customReleaseFrom === 'string'
+        ? tieredRecency.customReleaseFrom.trim()
+        : '';
+      if (customReleaseFrom) {
+        tierOneParams[dateField] = customReleaseFrom;
+      } else {
+        tierOneParams[dateField] = `__tmdb_date__:${tieredRecency.recencyPreset || 'last_year'}:from`;
+      }
+      if (tieredRecency.onlyReleased !== false) {
+        tierOneParams[dateToField] = '__tmdb_date__:today:to';
+      }
+
+      const tierOnePages = Math.ceil(tierCount / tmdbPageSize);
+      const tierOneItems: any[] = [];
+      for (let tierPage = 1; tierPage <= tierOnePages; tierPage += 1) {
+        const resolvedTierParams = resolveDynamicTmdbDiscoverParams(tierOneParams, { timezone: config.timezone });
+        const items = await fetchDiscoverPage(resolvedTierParams, tierPage);
+        tierOneItems.push(...items);
+        if (items.length < tmdbPageSize) break;
+      }
+
+      const tierOneCatalogItems = tierOneItems.slice(0, tierCount);
+      const requestedStart = (discoverPage - 1) * tmdbPageSize;
+      const tierOneSlice = tierOneCatalogItems.slice(requestedStart, requestedStart + tmdbPageSize);
+      if (tierOneSlice.length === tmdbPageSize || requestedStart < tierOneCatalogItems.length) {
+        tieredResults = tierOneSlice;
+      } else {
+        const tierTwoIds = new Set(tierOneCatalogItems.map((item: any) => String(item?.id)));
+        const tierTwoOffset = Math.max(0, requestedStart - tierOneCatalogItems.length);
+        const tierTwoItems: any[] = [];
+        const targetCount = tierTwoOffset + tmdbPageSize;
+        for (let tierPage = 1; tierPage <= 50 && tierTwoItems.length < targetCount; tierPage += 1) {
+          const items = await fetchDiscoverPage(resolveDynamicTmdbDiscoverParams(tierTwoParams, { timezone: config.timezone }), tierPage);
+          const filtered = items.filter((item: any) => !tierTwoIds.has(String(item?.id)));
+          tierTwoItems.push(...filtered);
+          if (items.length < tmdbPageSize) break;
+        }
+        tieredResults = tierTwoItems.slice(tierTwoOffset, tierTwoOffset + tmdbPageSize);
+      }
+    }
+
     // TMDB's discover/tv runtime filter matches only on episode_run_time, which is
     // empty for many shows, so it silently drops them. Filter locally instead,
     // falling back to last/next episode runtime (same chain getMeta uses for display).
@@ -1104,9 +1170,11 @@ async function getTmdbAndMdbListCatalog(type: string, id: string, genre: string,
     }
 
     try {
-      const response = mediaType === 'movie'
-        ? await moviedb.discoverMovie(parameters, config)
-        : await moviedb.discoverTv(parameters, config);
+      const response = tieredResults
+        ? { results: tieredResults }
+        : (mediaType === 'movie'
+          ? await moviedb.discoverMovie(parameters, config)
+          : await moviedb.discoverTv(parameters, config));
 
       if (!response?.results || !Array.isArray(response.results) || response.results.length === 0) {
         logger.info(`[TMDB Discover] No results for ${id} at page ${discoverPage}`);
@@ -3720,7 +3788,9 @@ async function getMergedCatalog(
         })
       );
 
-      const tagged = roundRobinInterleaveTagged(results.map(r => r.items));
+      const tagged = mergeMode === 'popularity'
+        ? popularitySortOrRoundRobin(results.map(r => r.items))
+        : roundRobinInterleaveTagged(results.map(r => r.items));
       const { added, consumedPerSource } = collectDedupedTagged(
         tagged.map(t => ({ meta: t.item, srcIdx: t.srcIdx })),
         collected
