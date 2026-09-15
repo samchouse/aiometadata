@@ -5398,7 +5398,7 @@ function CatalogsSettingsContent({
   const [mergeName, setMergeName] = useState('');
   const [mergeShowInHome, setMergeShowInHome] = useState(true);
   const [mergeDisplayType, setMergeDisplayType] = useState('');
-  const [mergeMode, setMergeMode] = useState<MergeMode>(MERGED_CATALOG_MODE);
+  const [mergeMode, setMergeMode] = useState<MergeMode>('popularity');
   const [mergeBySource, setMergeBySource] = useState(false);
 
   const openMergeDialog = () => {
@@ -5415,7 +5415,7 @@ function CatalogsSettingsContent({
     setMergeName(baseName);
     setMergeShowInHome(true);
     setMergeDisplayType('');
-    setMergeMode('interleaved');
+    setMergeMode('popularity');
     setMergeBySource(false);
     setShowMergeDialog(true);
   };

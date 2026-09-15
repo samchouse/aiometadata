@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: FSL-1.1-ALv2
 // Copyright (C) 2026 cedya77 and AIOMetadata contributors, see NOTICE
 /** How several catalogs combine into one list, for a merged catalog and a builder folder alike. */
-export type MergeMode = 'interleaved' | 'sequential' | 'alternating';
+export type MergeMode = 'interleaved' | 'sequential' | 'alternating' | 'popularity';
 
 export interface MergeModeInfo {
   id: MergeMode;
@@ -13,6 +13,7 @@ export interface MergeModeInfo {
 
 export const MERGE_MODES: MergeModeInfo[] = [
   { id: 'interleaved', label: 'Interleaved', description: 'Mix items from all sources (A B A B)', example: 'A1 B1 A2 B2' },
+  { id: 'popularity', label: 'Popularity Balanced', description: 'Sort both sources by popularity, or use 1:1 mixing', example: 'highest popularity first' },
   { id: 'sequential', label: 'Sequential', description: 'Show all of source A, then B, etc.', example: 'all A, then all B' },
   { id: 'alternating', label: 'Alternating', description: 'Page 1 = A, page 2 = B, cycle', example: 'page 1 = A, page 2 = B' },
 ];

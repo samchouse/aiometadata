@@ -47,6 +47,7 @@ type DatePresetKey =
   | 'last_month'
   | 'this_year'
   | 'last_year'
+  | 'last_2_years'
   | 'last_5_years'
   | 'last_10_years'
   | 'era_2010s'
@@ -63,6 +64,7 @@ type RelativeDatePresetKey =
   | 'last_month'
   | 'this_year'
   | 'last_year'
+  | 'last_2_years'
   | 'last_5_years'
   | 'last_10_years';
 
@@ -226,6 +228,7 @@ const DATE_PRESET_OPTIONS: Array<{ value: Exclude<DatePresetKey, 'custom'>; labe
   { value: 'last_90_days', label: 'Last 90 Days' },
   { value: 'last_180_days', label: 'Last 180 Days' },
   { value: 'this_year', label: 'This Year' },
+  { value: 'last_2_years', label: 'Last 2 Years' },
   { value: 'last_year', label: 'Last 12 Months' },
   { value: 'last_5_years', label: 'Last 5 Years' },
   { value: 'last_10_years', label: 'Last 10 Years' },
@@ -243,6 +246,7 @@ const RELATIVE_DATE_PRESET_KEYS: RelativeDatePresetKey[] = [
   'last_month',
   'this_year',
   'last_year',
+  'last_2_years',
   'last_5_years',
   'last_10_years',
 ];
@@ -627,6 +631,9 @@ function getDateRangeFromPreset(preset: Exclude<DatePresetKey, 'custom'>): { fro
       return { from: `${now.getFullYear()}-01-01`, to: `${now.getFullYear()}-12-31` };
     case 'last_year':
       fromDate.setFullYear(fromDate.getFullYear() - 1);
+      return { from: formatLocalDateForInput(fromDate), to };
+    case 'last_2_years':
+      fromDate.setFullYear(fromDate.getFullYear() - 2);
       return { from: formatLocalDateForInput(fromDate), to };
     case 'last_5_years':
       fromDate.setFullYear(fromDate.getFullYear() - 5);
@@ -1038,6 +1045,11 @@ export function DiscoverBuilderDialog({ isOpen, onClose, editingCatalog, customi
   const [simklYear, setSimklYear] = useState(getSimklDefaultYear('movies'));
   const [includeAdult, setIncludeAdult] = useState<boolean>(config.includeAdult);
   const [releasedOnly, setReleasedOnly] = useState<boolean>(false);
+  const [tieredRecencyEnabled, setTieredRecencyEnabled] = useState(false);
+  const [tieredRecencyPreset, setTieredRecencyPreset] = useState<'this_month' | 'last_6_months' | 'last_year' | 'last_2_years' | 'this_year'>('last_year');
+  const [tieredCustomReleaseFrom, setTieredCustomReleaseFrom] = useState('');
+  const [tieredCount, setTieredCount] = useState('40');
+  const [tieredOnlyReleased, setTieredOnlyReleased] = useState(true);
   const [tmdbTvStatuses, setTmdbTvStatuses] = useState<string[]>([]);
   const [tmdbMovieReleaseTypes, setTmdbMovieReleaseTypes] = useState<string[]>([]);
   const [tmdbTvTypes, setTmdbTvTypes] = useState<string[]>([]);
@@ -1461,6 +1473,11 @@ export function DiscoverBuilderDialog({ isOpen, onClose, editingCatalog, customi
     setSimklYear(getSimklDefaultYear('movies'));
     setIncludeAdult(config.includeAdult);
     setReleasedOnly(false);
+    setTieredRecencyEnabled(false);
+    setTieredRecencyPreset('last_year');
+    setTieredCustomReleaseFrom('');
+    setTieredCount('40');
+    setTieredOnlyReleased(true);
     setTmdbTvStatuses([]);
     setTmdbMovieReleaseTypes([]);
     setTmdbTvTypes([]);
@@ -1664,6 +1681,11 @@ export function DiscoverBuilderDialog({ isOpen, onClose, editingCatalog, customi
     // TMDB-only
     if (typeof fs.includeAdult === 'boolean') setIncludeAdult(fs.includeAdult);
     if (typeof fs.releasedOnly === 'boolean') setReleasedOnly(fs.releasedOnly);
+    if (typeof fs.tieredRecencyEnabled === 'boolean') setTieredRecencyEnabled(fs.tieredRecencyEnabled);
+    if (fs.tieredRecencyPreset) setTieredRecencyPreset(fs.tieredRecencyPreset);
+    if (fs.tieredCustomReleaseFrom) setTieredCustomReleaseFrom(fs.tieredCustomReleaseFrom);
+    if (fs.tieredCount) setTieredCount(String(fs.tieredCount));
+    if (typeof fs.tieredOnlyReleased === 'boolean') setTieredOnlyReleased(fs.tieredOnlyReleased);
     if (fs.tmdbTvStatuses) setTmdbTvStatuses(fs.tmdbTvStatuses);
     if (fs.tmdbMovieReleaseTypes) setTmdbMovieReleaseTypes(fs.tmdbMovieReleaseTypes);
     if (fs.tmdbTvTypes) setTmdbTvTypes(fs.tmdbTvTypes);
@@ -1806,6 +1828,11 @@ export function DiscoverBuilderDialog({ isOpen, onClose, editingCatalog, customi
     if (fs.sortBy) setSortBy(fs.sortBy);
     if (typeof fs.includeAdult === 'boolean') setIncludeAdult(fs.includeAdult);
     if (typeof fs.releasedOnly === 'boolean') setReleasedOnly(fs.releasedOnly);
+    if (typeof fs.tieredRecencyEnabled === 'boolean') setTieredRecencyEnabled(fs.tieredRecencyEnabled);
+    if (fs.tieredRecencyPreset) setTieredRecencyPreset(fs.tieredRecencyPreset);
+    if (fs.tieredCustomReleaseFrom) setTieredCustomReleaseFrom(fs.tieredCustomReleaseFrom);
+    if (fs.tieredCount) setTieredCount(String(fs.tieredCount));
+    if (typeof fs.tieredOnlyReleased === 'boolean') setTieredOnlyReleased(fs.tieredOnlyReleased);
     if (fs.tmdbTvStatuses) setTmdbTvStatuses(fs.tmdbTvStatuses);
     if (fs.tmdbMovieReleaseTypes) setTmdbMovieReleaseTypes(fs.tmdbMovieReleaseTypes);
     if (fs.tmdbTvTypes) setTmdbTvTypes(fs.tmdbTvTypes);
@@ -2747,6 +2774,11 @@ export function DiscoverBuilderDialog({ isOpen, onClose, editingCatalog, customi
       Object.assign(state, {
         includeAdult,
         releasedOnly,
+        tieredRecencyEnabled,
+        tieredRecencyPreset,
+        tieredCustomReleaseFrom,
+        tieredCount: Number(tieredCount),
+        tieredOnlyReleased,
         tmdbTvStatuses,
         tmdbMovieReleaseTypes,
         tmdbTvTypes,
@@ -3034,6 +3066,15 @@ export function DiscoverBuilderDialog({ isOpen, onClose, editingCatalog, customi
             source: discoverSource,
             mediaType: discoverMediaType as 'movie' | 'tv' | 'series' | 'anime',
             params: persistedParams,
+            ...(discoverSource === 'tmdb' && tieredRecencyEnabled && sortBy === 'popularity.desc' && {
+              tieredRecency: {
+                enabled: true,
+                tierCount: Number(tieredCount) || 40,
+                recencyPreset: tieredCustomReleaseFrom ? undefined : tieredRecencyPreset,
+                customReleaseFrom: tieredCustomReleaseFrom || null,
+                onlyReleased: tieredOnlyReleased,
+              },
+            }),
             formState,
           }
         }
@@ -3279,6 +3320,58 @@ export function DiscoverBuilderDialog({ isOpen, onClose, editingCatalog, customi
                       </SelectContent>
                     </Select>
                   </div>
+                  {discoverSource === 'tmdb' && sortBy === 'popularity.desc' && (
+                    <div className="md:col-span-2 rounded-md border p-3 space-y-3">
+                      <div className="flex items-center justify-between gap-4">
+                        <div>
+                          <Label className="text-sm">Prioritize Recent Releases</Label>
+                          <p className="text-xs text-muted-foreground">Show new and popular titles first, followed by all-time popular titles.</p>
+                        </div>
+                        <Switch checked={tieredRecencyEnabled} onCheckedChange={setTieredRecencyEnabled} />
+                      </div>
+                      {tieredRecencyEnabled && (
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                          <div className="space-y-2">
+                            <Label>Recency Window</Label>
+                            <Select value={tieredCustomReleaseFrom ? 'custom' : tieredRecencyPreset} onValueChange={(value) => {
+                              if (value === 'custom') {
+                                setTieredCustomReleaseFrom(tieredCustomReleaseFrom || getTodayLocalDateString());
+                              } else {
+                                setTieredCustomReleaseFrom('');
+                                setTieredRecencyPreset(value as typeof tieredRecencyPreset);
+                              }
+                            }}>
+                              <SelectTrigger><SelectValue /></SelectTrigger>
+                              <SelectContent>
+                                <SelectItem value="this_month">This Month</SelectItem>
+                                <SelectItem value="last_6_months">Last 6 Months</SelectItem>
+                                <SelectItem value="last_year">Last Year</SelectItem>
+                                <SelectItem value="last_2_years">Last 2 Years</SelectItem>
+                                <SelectItem value="this_year">This Year</SelectItem>
+                                <SelectItem value="custom">Custom Date</SelectItem>
+                              </SelectContent>
+                            </Select>
+                            {tieredCustomReleaseFrom && (
+                              <Input type="date" value={tieredCustomReleaseFrom} onChange={(event) => setTieredCustomReleaseFrom(event.target.value)} />
+                            )}
+                          </div>
+                          <div className="space-y-2">
+                            <Label>Items in Top Tier</Label>
+                            <Select value={tieredCount} onValueChange={setTieredCount}>
+                              <SelectTrigger><SelectValue /></SelectTrigger>
+                              <SelectContent>
+                                {[20, 40, 60, 80, 100].map(value => <SelectItem key={value} value={String(value)}>{value}</SelectItem>)}
+                              </SelectContent>
+                            </Select>
+                          </div>
+                          <div className="flex items-center justify-between rounded-md border p-3">
+                            <Label className="text-sm">Only Released</Label>
+                            <Switch checked={tieredOnlyReleased} onCheckedChange={setTieredOnlyReleased} />
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  )}
                   {discoverSource === 'tvdb' && catalogType === 'series' && (
                     <div className="space-y-2">
                       <Label>Sort Direction</Label>
