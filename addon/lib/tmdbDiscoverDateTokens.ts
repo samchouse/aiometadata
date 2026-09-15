@@ -4,9 +4,11 @@ const RELATIVE_DATE_PRESET_KEYS = new Set([
   'today',
   'this_week',
   'this_month',
+  'last_6_months',
   'last_month',
   'this_year',
   'last_year',
+  'last_2_years',
   'last_5_years',
   'last_10_years'
 ]);
@@ -127,8 +129,14 @@ function getDateRangeFromRelativePreset(preset: string, timezone: string, nowInp
     case 'last_month':
       fromDate.setUTCDate(fromDate.getUTCDate() - 30);
       break;
+    case 'last_6_months':
+      fromDate.setUTCMonth(fromDate.getUTCMonth() - 6);
+      break;
     case 'last_year':
       fromDate.setUTCFullYear(fromDate.getUTCFullYear() - 1);
+      break;
+    case 'last_2_years':
+      fromDate.setUTCFullYear(fromDate.getUTCFullYear() - 2);
       break;
     case 'last_5_years':
       fromDate.setUTCFullYear(fromDate.getUTCFullYear() - 5);

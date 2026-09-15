@@ -33,9 +33,14 @@ function computeDiscoverSignature(catalogConfig: any): string | null {
   const params = getDiscoverParams(catalogConfig);
   if (!params || typeof params !== 'object' || Array.isArray(params)) return null;
 
+  const tieredRecency = catalogConfig?.metadata?.discover?.tieredRecency;
+  const signatureInput = tieredRecency
+    ? { params, tieredRecency }
+    : params;
+
   return crypto
     .createHash('md5')
-    .update(stableStringify(params))
+    .update(stableStringify(signatureInput))
     .digest('hex')
     .substring(0, 8);
 }

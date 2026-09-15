@@ -26,6 +26,19 @@ export function roundRobinInterleaveTagged<T>(arrays: T[][]): Array<{ item: T; s
   return result;
 }
 
+export function popularitySortOrRoundRobin<T extends Record<string, any>>(
+  arrays: T[][]
+): Array<{ item: T; srcIdx: number }> {
+  const tagged = roundRobinInterleaveTagged(arrays);
+  const hasPopularity = tagged.length > 0 && tagged.every(({ item }) =>
+    typeof item?.popularity === 'number' && Number.isFinite(item.popularity)
+  );
+
+  if (!hasPopularity) return tagged;
+
+  return tagged.slice().sort((left, right) => right.item.popularity - left.item.popularity);
+}
+
 /**
  * Multi-namespace dedup key. Returns the first available canonical id. Items
  * lacking any usable id pass through (treated as unique by passing null to the
