@@ -2425,15 +2425,22 @@ async function fetchTraktCalendarShows(
 }
 
 /** The last watched set computed for a token, for when Trakt cannot be asked right now. */
-async function lastKnownWatchedIds(tokenHash: string): Promise<{ movieImdbIds: Set<string>, showImdbIds: Set<string> } | null> {
-  const fingerprint = await readGlobalCache(`trakt_watched_ids_latest:${tokenHash}`);
-  const data = fingerprint ? await readGlobalCache(`trakt_watched_ids:${tokenHash}:${fingerprint}`) : null;
+async function lastKnownWatchedIds(tokenHash: string): Promise<{ movieImdbIds: Set<string>, movieTmdbIds: Set<number>, showImdbIds: Set<string>, showTmdbIds: Set<number>, showProgress: Record<string, { seen: number, total: number }>, showEpisodes: Record<string, string[]> } | null> {
+  const fingerprint = await readGlobalCache(`trakt_watched_ids_latest:v2:${tokenHash}`);
+  const data = fingerprint ? await readGlobalCache(`trakt_watched_ids:v2:${tokenHash}:${fingerprint}`) : null;
   if (!data) return null;
-  return { movieImdbIds: new Set(data.movieIds), showImdbIds: new Set(data.showIds) };
+  return {
+    movieImdbIds: new Set(data.movieIds || []),
+    movieTmdbIds: new Set(data.movieTmdbIds || []),
+    showImdbIds: new Set(data.showIds || []),
+    showTmdbIds: new Set(data.showTmdbIds || []),
+    showProgress: data.showProgress || {},
+    showEpisodes: data.showEpisodes || {}
+  };
 }
 
 // A catalog is waiting on this, so it must not sit behind a rate-limit pause.
-async function getTraktWatchedIds(config: any): Promise<{ movieImdbIds: Set<string>, showImdbIds: Set<string> } | null> {
+async function getTraktWatchedIds(config: any): Promise<{ movieImdbIds: Set<string>, movieTmdbIds: Set<number>, showImdbIds: Set<string>, showTmdbIds: Set<number>, showProgress: Record<string, { seen: number, total: number }>, showEpisodes: Record<string, string[]> } | null> {
   let tokenHash: string | null = null;
   try {
     const accessToken = await getTraktAccessToken(config);
@@ -2453,7 +2460,6 @@ async function getTraktWatchedIds(config: any): Promise<{ movieImdbIds: Set<stri
     const activities = await cacheWrapGlobal(activitiesCacheKey, async () => {
       return await fetchTraktLastActivity(accessToken);
     }, 300);
-
     const moviesWatchedAt = activities?.movies?.watched_at || '';
     const episodesWatchedAt = activities?.episodes?.watched_at || '';
     const fingerprint = crypto.createHash('sha256')
@@ -2461,7 +2467,7 @@ async function getTraktWatchedIds(config: any): Promise<{ movieImdbIds: Set<stri
       .digest('hex')
       .substring(0, 16);
 
-    const watchedCacheKey = `trakt_watched_ids:${tokenHash}:${fingerprint}`;
+    const watchedCacheKey = `trakt_watched_ids:v2:${tokenHash}:${fingerprint}`;
     const watchedData = await cacheWrapGlobal(watchedCacheKey, async () => {
       const [watchedMovies, watchedShows] = await Promise.all([
         fetchTraktWatchedMovies(accessToken),
@@ -2469,12 +2475,18 @@ async function getTraktWatchedIds(config: any): Promise<{ movieImdbIds: Set<stri
       ]);
 
       const movieIds: string[] = [];
+      const movieTmdbIds: number[] = [];
+      const showProgress: Record<string, { seen: number, total: number }> = {};
+      const showEpisodes: Record<string, string[]> = {};
       for (const item of watchedMovies) {
         const imdbId = item.movie?.ids?.imdb;
         if (imdbId) movieIds.push(imdbId);
+        const tmdbId = item.movie?.ids?.tmdb;
+        if (tmdbId) movieTmdbIds.push(tmdbId);
       }
 
       const showIds: string[] = [];
+      const showTmdbIds: number[] = [];
       let partialCount = 0;
       for (const item of watchedShows) {
         const imdbId = item.show?.ids?.imdb;
@@ -2483,32 +2495,54 @@ async function getTraktWatchedIds(config: any): Promise<{ movieImdbIds: Set<stri
         const airedEpisodes = item.show?.aired_episodes || 0;
         if (airedEpisodes === 0) continue;
 
-        let watchedEpisodes = 0;
+        const watchedEpisodeKeys = new Set<string>();
         if (item.seasons && Array.isArray(item.seasons)) {
           for (const season of item.seasons) {
             if (season.number === 0) continue;
             if (season.episodes && Array.isArray(season.episodes)) {
-              watchedEpisodes += season.episodes.length;
+              for (const episode of season.episodes) {
+                if (episode?.number !== undefined) watchedEpisodeKeys.add(`S${season.number}E${episode.number}`);
+              }
             }
+          }
+        }
+        const watchedEpisodes = watchedEpisodeKeys.size;
+        const tmdbId = item.show?.ids?.tmdb;
+        if (watchedEpisodes) {
+          showEpisodes[imdbId] = [...watchedEpisodeKeys];
+          if (tmdbId) {
+            showEpisodes[String(tmdbId)] = [...watchedEpisodeKeys];
+            showEpisodes[`tmdb:${tmdbId}`] = [...watchedEpisodeKeys];
           }
         }
 
         if (watchedEpisodes >= airedEpisodes) {
           showIds.push(imdbId);
+          if (tmdbId) showTmdbIds.push(tmdbId);
         } else {
+          const progress = { seen: watchedEpisodes, total: airedEpisodes };
+          showProgress[imdbId] = progress;
+          if (tmdbId) {
+            showProgress[String(tmdbId)] = progress;
+            showProgress[`tmdb:${tmdbId}`] = progress;
+          }
           partialCount++;
         }
       }
 
       logger.info(`[Watched IDs] Fetched ${movieIds.length} watched movies, ${showIds.length} fully-watched shows (${partialCount} partial, skipped)`);
-      return { movieIds, showIds };
+      return { movieIds, movieTmdbIds, showIds, showTmdbIds, showProgress, showEpisodes };
     }, 86400);
 
-    await writeGlobalCache(`trakt_watched_ids_latest:${tokenHash}`, fingerprint, 86400 * 7);
+    await writeGlobalCache(`trakt_watched_ids_latest:v2:${tokenHash}`, fingerprint, 86400 * 7);
 
     return {
       movieImdbIds: new Set(watchedData.movieIds),
-      showImdbIds: new Set(watchedData.showIds)
+      movieTmdbIds: new Set(watchedData.movieTmdbIds || []),
+      showImdbIds: new Set(watchedData.showIds),
+      showTmdbIds: new Set(watchedData.showTmdbIds || []),
+      showProgress: watchedData.showProgress || {},
+      showEpisodes: watchedData.showEpisodes || {}
     };
   } catch (err: any) {
     const known = tokenHash ? await lastKnownWatchedIds(tokenHash) : null;

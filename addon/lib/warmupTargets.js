@@ -73,9 +73,16 @@ function collectWarmupTargets(metas, config, fallbackType, deps) {
     targets.push({ imageClass, url, http: url, checkClass, checkKey });
   };
 
+  const getHistoryVal = config._btttrHistory
+    ? (deps?.btttrHistoryValue || require('../utils/btttrHistory').btttrHistoryValue)
+    : null;
+
   for (const meta of metas) {
     const ids = extractIdsFromWarmerMeta(meta);
     const type = meta.type || fallbackType;
+    if (getHistoryVal && config._btttrHistory) {
+      config._btttrHistoryValue = getHistoryVal(ids, type, config._btttrHistory);
+    }
     const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
 
     let posterWarmed = false;

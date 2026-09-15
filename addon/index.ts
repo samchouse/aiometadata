@@ -39,6 +39,7 @@ const { loadConfigFromDatabase } = require('./lib/configApi');
 const { getTrending } = require("./lib/getTrending");
 const { resolveProxyRatingPosterUrl, parseAnimeCatalogMetaBatch } = require("./utils/parseProps");
 const { extractIdsFromMeta, extractCanonicalIdFromDynamicUpNextId } = require("./utils/metaIds");
+const { getBtttrHistory, btttrHistoryValue, patternUsesBtttrHistory } = require('./utils/btttrHistory');
 const { sleep } = require("./utils/concurrency");
 const { resolveMdblistKey, mdblistCacheKey } = require("./utils/mdblistUtils");
 const { normalizeTraktEndpoint, resolveTraktProxyAuthMode } = require("./utils/traktProxyRoutes");
@@ -5188,6 +5189,9 @@ addon.get("/stremio/:userUUID/catalog/:type/:id{/:extra}.json", async function (
       : (catalogConfig?.enableRatingPosters !== false);
     const posterPattern = posterPatternsEnabled ? require('./utils/parseProps').resolvePosterPattern(config) : null;
     if ((posterPattern || config.customBackgroundUrlPattern || config.customLandscapeUrlPattern || config.customLogoUrlPattern) && responseData?.metas && Array.isArray(responseData.metas)) {
+      const btttrHistory = patternUsesBtttrHistory(posterPattern, config.customBackgroundUrlPattern, config.customLandscapeUrlPattern, config.customLogoUrlPattern)
+        ? await getBtttrHistory(config)
+        : null;
       const isUpNextCatalog = cleanId.includes('up_next') || cleanId.includes('upnext');
       const upNextUsesShowPoster = isUpNextCatalog && catalogConfig?.metadata?.useShowPosterForUpNext === true;
       const { resolveCustomArtUrl, getPosterRatingApiKey } = require('./utils/parseProps');
@@ -5195,6 +5199,7 @@ addon.get("/stremio/:userUUID/catalog/:type/:id{/:extra}.json", async function (
       for (const meta of responseData.metas) {
         const ids = extractIdsFromMeta(meta);
         const type = meta.type || actualType;
+        config._btttrHistoryValue = btttrHistory ? btttrHistoryValue(ids, type, btttrHistory) : '';
         if (posterPattern && (!isUpNextCatalog || upNextUsesShowPoster)) {
           if (proxyApiKey) {
             const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
@@ -5369,6 +5374,14 @@ addon.get("/stremio/:userUUID/meta/:type/:id.json", async function (req, res) {
       const { resolveCustomArtUrl, resolvePosterPattern, resolveThumbnailPattern, getPosterRatingApiKey } = require('./utils/parseProps');
       const ids = extractIdsFromMeta(result.meta);
       const metaType = result.meta.type || type;
+      const btttrHistory = patternUsesBtttrHistory(
+        resolvePosterPattern(config),
+        config.customBackgroundUrlPattern,
+        config.customLandscapeUrlPattern,
+        config.customLogoUrlPattern,
+        resolveThumbnailPattern(config),
+      ) ? await getBtttrHistory(config) : null;
+      config._btttrHistoryValue = btttrHistory ? btttrHistoryValue(ids, metaType, btttrHistory) : '';
       // Apply poster pattern unless enableRatingPostersForLibrary is explicitly disabled
       if (config.enableRatingPostersForLibrary !== false) {
         const metaPosterPattern = resolvePosterPattern(config);

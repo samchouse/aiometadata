@@ -1,7 +1,9 @@
+import crypto from 'crypto';
 import { getMeta } from "../lib/getMeta.js";
-import { cacheWrapMetaSmart } from "../lib/getCache.js";
+import { cacheWrapMetaSmart, cacheWrapGlobal, writeGlobalCache, readGlobalCache } from "../lib/getCache.js";
 import { resolveAllIds } from "../lib/id-resolver.js";
 import { UserConfig } from "../types/index.js";
+import { envInt } from "./envNumber.js";
 import consola from 'consola';
 
 const logger = consola.withTag('PublicMetaDB');
@@ -562,6 +564,252 @@ async function fetchSkips(
   return Array.isArray(data?.items) ? data.items : [];
 }
 
+async function lastKnownPmdbWatchedIds(keyHash: string): Promise<PublicmetadbWatchedIds | null> {
+  try {
+    const fingerprint = await readGlobalCache(`pmdb_watched_ids_latest:v2:${keyHash}`);
+    const data = fingerprint ? await readGlobalCache(`pmdb_watched_ids:v2:${keyHash}:${fingerprint}`) : null;
+    if (!data) return null;
+    return {
+      movieTmdbIds: new Set(data.movieTmdbIds || []),
+      movieImdbIds: new Set(data.movieImdbIds || []),
+      showTmdbIds: new Set(data.showTmdbIds || []),
+      showImdbIds: new Set(data.showImdbIds || []),
+      showProgress: data.showProgress || {},
+      showEpisodes: data.showEpisodes || {},
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function resolveShowTotalEpisodes(tmdbId: number, config: any): Promise<number | null> {
+  const cacheKey = `pmdb_show_total_episodes:${tmdbId}`;
+  return cacheWrapGlobal(cacheKey, async () => {
+    // 1. Try TMDB tvInfo
+    try {
+      const { tvInfo } = require('../lib/getTmdb');
+      const detail = await tvInfo({ id: tmdbId }, config);
+      if (detail) {
+        if (Array.isArray(detail.seasons)) {
+          let count = 0;
+          const now = Date.now();
+          for (const s of detail.seasons) {
+            if (Number(s?.season_number) === 0) continue;
+            const aired = Date.parse(String(s?.air_date || ''));
+            if (Number.isFinite(aired) && aired > now) continue;
+            const c = Number(s?.episode_count);
+            if (Number.isFinite(c) && c > 0) count += c;
+          }
+          if (count > 0) return count;
+        }
+        if (Number.isFinite(detail.number_of_episodes) && detail.number_of_episodes > 0) {
+          return Number(detail.number_of_episodes);
+        }
+      }
+    } catch (err: any) {
+      logger.debug(`[Watched IDs] TMDB tvInfo failed for tmdb:${tmdbId}: ${err.message}`);
+    }
+
+    // 2. Try title metadata via getMeta
+    try {
+      const metaResult = await getMeta('series', config?.language || 'en-US', `tmdb:${tmdbId}`, config, undefined, true);
+      if (metaResult?.meta?.videos && Array.isArray(metaResult.meta.videos)) {
+        const now = Date.now();
+        const normalVideos = metaResult.meta.videos.filter((v: any) => {
+          if (Number(v?.season) === 0) return false;
+          const at = Date.parse(v?.released ?? v?.firstAired ?? '');
+          return !Number.isFinite(at) || at <= now;
+        });
+        if (normalVideos.length > 0) return normalVideos.length;
+      }
+    } catch (err: any) {
+      logger.debug(`[Watched IDs] getMeta failed for tmdb:${tmdbId}: ${err.message}`);
+    }
+
+    return null;
+  }, 86400 * 7);
+}
+
+export interface PublicmetadbWatchedIds {
+  movieTmdbIds: Set<number>;
+  movieImdbIds: Set<string>;
+  showTmdbIds: Set<number>;
+  showImdbIds: Set<string>;
+  showProgress: Record<string, { seen: number; total: number }>;
+  showEpisodes: Record<string, string[]>;
+}
+
+async function getPublicmetadbWatchedIds(config: any): Promise<PublicmetadbWatchedIds | null> {
+  const apiKey = config?.apiKeys?.publicmetadb;
+  if (!apiKey) return null;
+
+  let keyHash: string | null = null;
+  try {
+    keyHash = crypto.createHash('sha256').update(apiKey).digest('hex').substring(0, 16);
+    const head = await cacheWrapGlobal(
+      `pmdb_watched_head:${keyHash}`,
+      async () => {
+        const page = await fetchWatched(apiKey, 1, 1);
+        const first = page.items[0];
+        return `${page.total}|${first?.id ?? ''}|${first?.watched_at ?? ''}`;
+      },
+      envInt('PMDB_ACTIVITIES_TTL', 300, 30),
+      { upstream: true }
+    );
+    const fingerprint = crypto.createHash('sha256').update(String(head)).digest('hex').substring(0, 16);
+
+    const watchedCacheKey = `pmdb_watched_ids:v2:${keyHash}:${fingerprint}`;
+    const watchedData = await cacheWrapGlobal(watchedCacheKey, async () => {
+      const maxPages = envInt('PUBLICMETADB_WATCH_HISTORY_PAGES', envInt('JELLYFIN_WATCHED_MAX_PAGES', 50, 1), 1);
+      const rows: any[] = [];
+      for (let page = 1; page <= maxPages; page += 1) {
+        const result = await fetchWatched(apiKey, page, 500);
+        rows.push(...result.items);
+        if (page >= result.totalPages || !result.items.length) break;
+      }
+
+      const movieTmdbIds = new Set<number>();
+      const movieImdbIds = new Set<string>();
+      const showTmdbIds = new Set<number>();
+      const showImdbIds = new Set<string>();
+      const showProgress: Record<string, { seen: number; total: number }> = {};
+      const showEpisodes: Record<string, string[]> = {};
+
+      const showEpisodesMap = new Map<number, Set<string>>();
+      const showTotalFromRow = new Map<number, number>();
+      const showImdbMap = new Map<number, string>();
+
+      let wikiMapper: any = null;
+      try {
+        wikiMapper = require('../lib/wiki-mapper');
+      } catch {}
+
+      for (const row of rows) {
+        const rawTmdb = Number(row?.tmdb_id);
+        if (!Number.isFinite(rawTmdb) || rawTmdb <= 0) continue;
+        const mediaType = row?.media_type;
+
+        if (mediaType === 'movie') {
+          movieTmdbIds.add(rawTmdb);
+          let imdb = row?.imdb_id ? String(row.imdb_id).trim() : '';
+          if (!imdb && wikiMapper?.getByTmdbId) {
+            try {
+              const mapped = wikiMapper.getByTmdbId(String(rawTmdb), 'movie')?.imdbId;
+              if (mapped) imdb = mapped;
+            } catch {}
+          }
+          if (imdb) {
+            movieImdbIds.add(imdb.startsWith('tt') ? imdb : `tt${imdb}`);
+          }
+          continue;
+        }
+
+        // TV / Series: ignore season 0 (specials)
+        const season = Number(row?.season);
+        const episode = Number(row?.episode);
+        if (!Number.isFinite(season) || !Number.isFinite(episode) || season === 0) continue;
+
+        if (!showEpisodesMap.has(rawTmdb)) {
+          showEpisodesMap.set(rawTmdb, new Set<string>());
+        }
+        showEpisodesMap.get(rawTmdb)!.add(`S${season}E${episode}`);
+
+        // Check for row total episodes metadata
+        const rowTotal = Number(
+          row?.aired_episodes ??
+          row?.airedEpisodes ??
+          row?.total_episodes ??
+          row?.totalEpisodes ??
+          row?.episode_count ??
+          row?.show?.aired_episodes ??
+          row?.show?.total_episodes
+        );
+        if (Number.isFinite(rowTotal) && rowTotal > 0 && !showTotalFromRow.has(rawTmdb)) {
+          showTotalFromRow.set(rawTmdb, rowTotal);
+        }
+
+        if (!showImdbMap.has(rawTmdb)) {
+          let imdb = row?.imdb_id ? String(row.imdb_id).trim() : '';
+          if (!imdb && wikiMapper?.getByTmdbId) {
+            try {
+              const mapped = wikiMapper.getByTmdbId(String(rawTmdb), 'series')?.imdbId;
+              if (mapped) imdb = mapped;
+            } catch {}
+          }
+          if (imdb) {
+            showImdbMap.set(rawTmdb, imdb.startsWith('tt') ? imdb : `tt${imdb}`);
+          }
+        }
+      }
+
+      // Resolve total normal episodes for TV shows
+      const showEntries = Array.from(showEpisodesMap.entries());
+      await Promise.all(
+        showEntries.map(async ([tmdbId, episodesSet]) => {
+          const seen = episodesSet.size;
+          if (seen <= 0) return;
+
+          let total = showTotalFromRow.get(tmdbId);
+          if (!total || total <= 0) {
+            total = await resolveShowTotalEpisodes(tmdbId, config);
+          }
+
+          const imdbId = showImdbMap.get(tmdbId);
+          const episodeKeys = Array.from(episodesSet);
+
+          if (total && seen >= total) {
+            showTmdbIds.add(tmdbId);
+            if (imdbId) showImdbIds.add(imdbId);
+          } else if (total && total > 0) {
+            const progress = { seen, total };
+            showProgress[String(tmdbId)] = progress;
+            showProgress[`tmdb:${tmdbId}`] = progress;
+            showEpisodes[String(tmdbId)] = episodeKeys;
+            showEpisodes[`tmdb:${tmdbId}`] = episodeKeys;
+            if (imdbId) {
+              showProgress[imdbId] = progress;
+              showEpisodes[imdbId] = episodeKeys;
+            }
+          } else {
+            showEpisodes[String(tmdbId)] = episodeKeys;
+            showEpisodes[`tmdb:${tmdbId}`] = episodeKeys;
+            if (imdbId) {
+              showEpisodes[imdbId] = episodeKeys;
+            }
+          }
+        })
+      );
+
+      logger.info(`[Watched IDs] ${movieTmdbIds.size} movies, ${showTmdbIds.size} fully-watched shows, ${Object.keys(showProgress).length / 2} in-progress on PublicMetaDB`);
+
+      return {
+        movieTmdbIds: Array.from(movieTmdbIds),
+        movieImdbIds: Array.from(movieImdbIds),
+        showTmdbIds: Array.from(showTmdbIds),
+        showImdbIds: Array.from(showImdbIds),
+        showProgress,
+        showEpisodes
+      };
+    }, 86400);
+
+    await writeGlobalCache(`pmdb_watched_ids_latest:v2:${keyHash}`, fingerprint, 86400 * 7);
+
+    return {
+      movieTmdbIds: new Set(watchedData.movieTmdbIds || []),
+      movieImdbIds: new Set(watchedData.movieImdbIds || []),
+      showTmdbIds: new Set(watchedData.showTmdbIds || []),
+      showImdbIds: new Set(watchedData.showImdbIds || []),
+      showProgress: watchedData.showProgress || {},
+      showEpisodes: watchedData.showEpisodes || {}
+    };
+  } catch (err: any) {
+    logger.warn(`[Watched IDs] Error fetching PublicMetaDB watched IDs: ${err.message}`);
+    const known = keyHash ? await lastKnownPmdbWatchedIds(keyHash) : null;
+    if (known) return known;
+    return null;
+  }
+}
+
 export {
   validateKey,
   fetchSkips,
@@ -582,4 +830,5 @@ export {
   checkinMovie,
   checkinEpisode,
   getMemoryStats,
+  getPublicmetadbWatchedIds,
 };
