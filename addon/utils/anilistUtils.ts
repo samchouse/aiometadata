@@ -1,6 +1,6 @@
 import crypto from 'crypto';
 // @ts-ignore
-import { cacheWrapGlobal } from '../lib/getCache';
+import { cacheWrapGlobal, readGlobalCache, writeGlobalCache } from '../lib/getCache';
 // @ts-ignore
 import anilist from '../lib/anilist';
 // @ts-ignore
@@ -32,8 +32,6 @@ export async function getAnilistAccessToken(config: any): Promise<string | undef
   }
 }
 
-/** A configuration that has never been saved has no row to load, so the browser
- *  passes the token id the connect flow handed it. */
 export async function getAnilistAccessTokenById(tokenId?: string): Promise<string | undefined> {
   if (!tokenId) return undefined;
   try {
@@ -42,6 +40,17 @@ export async function getAnilistAccessTokenById(tokenId?: string): Promise<strin
     return token.access_token || undefined;
   } catch {
     return undefined;
+  }
+}
+
+/** A configuration that has never been saved has no row to load, so the browser
+ *  passes the token id the connect flow handed it. */
+export async function getAnilistTokenData(tokenId: string): Promise<any> {
+  if (!tokenId) return null;
+  try {
+    return await database.getOAuthToken(tokenId);
+  } catch {
+    return null;
   }
 }
 
@@ -55,6 +64,7 @@ export async function resolveAnilistAccessToken(source: { tokenId?: string; user
 }
 
 export async function getAnilistWatchedIds(config: any): Promise<{ anilistIds: Set<number>, malIds: Set<number> } | null> {
+  let username: string | null = null;
   try {
     const anilistTokenId = config.apiKeys?.anilistTokenId;
     if (!anilistTokenId) return null;
@@ -62,7 +72,7 @@ export async function getAnilistWatchedIds(config: any): Promise<{ anilistIds: S
     const tokenData = await database.getOAuthToken(anilistTokenId);
     if (!tokenData || !tokenData.user_id) return null;
     
-    const username = tokenData.user_id;
+    username = tokenData.user_id;
 
     const cacheKey = `anilist_completed_ids:${username}`;
     const watchedData = await cacheWrapGlobal(cacheKey, async () => {
@@ -89,12 +99,23 @@ export async function getAnilistWatchedIds(config: any): Promise<{ anilistIds: S
       return { anilistIds, malIds };
     }, 86400);
 
+    await writeGlobalCache(`anilist_completed_ids_latest:${username}`, watchedData, 86400 * 7);
+
     return {
       anilistIds: new Set(watchedData.anilistIds),
       malIds: new Set(watchedData.malIds)
     };
   } catch (err: any) {
     logger.warn(`[Watched IDs] Error fetching AniList completed IDs: ${err.message}`);
+    try {
+      const known = username ? await readGlobalCache(`anilist_completed_ids_latest:${username}`) : null;
+      if (known) {
+        return {
+          anilistIds: new Set(known.anilistIds || []),
+          malIds: new Set(known.malIds || []),
+        };
+      }
+    } catch {}
     return null;
   }
 }

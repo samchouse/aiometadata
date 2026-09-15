@@ -41,6 +41,7 @@ const { loadConfigFromDatabase } = require('./lib/configApi');
 const { getTrending } = require("./lib/getTrending");
 const { resolveProxyRatingPosterUrl, parseAnimeCatalogMetaBatch } = require("./utils/parseProps");
 const { extractIdsFromMeta, extractCanonicalIdFromDynamicUpNextId } = require("./utils/metaIds");
+const { getBtttrHistory, btttrHistoryValue, patternUsesBtttrHistory } = require('./utils/btttrHistory');
 const { sleep } = require("./utils/concurrency");
 const { resolveMdblistKey, mdblistCacheKey } = require("./utils/mdblistUtils");
 const { normalizeTraktEndpoint, resolveTraktProxyAuthMode } = require("./utils/traktProxyRoutes");
@@ -5517,8 +5518,11 @@ const catalogRoute = async function (req, res) {
     const posterPatternsEnabled = config._currentSearchCatalogId
       ? (config.search?.engineRatingPosters?.[config._currentSearchCatalogId] === true)
       : (catalogConfig?.enableRatingPosters !== false);
-    const posterPattern = posterPatternsEnabled ? require('./utils/parseProps').resolvePosterPattern(config) : null;
-    if ((posterPattern || config.customBackgroundUrlPattern || config.customLandscapeUrlPattern || config.customLogoUrlPattern) && responseData?.metas && Array.isArray(responseData.metas)) {
+      const posterPattern = posterPatternsEnabled ? require('./utils/parseProps').resolvePosterPattern(config) : null;
+      if ((posterPattern || config.customBackgroundUrlPattern || config.customLandscapeUrlPattern || config.customLogoUrlPattern) && responseData?.metas && Array.isArray(responseData.metas)) {
+        const btttrHistory = patternUsesBtttrHistory(posterPattern, config.customBackgroundUrlPattern, config.customLandscapeUrlPattern, config.customLogoUrlPattern)
+          ? await getBtttrHistory(config)
+          : null;
       const isUpNextCatalog = cleanId.includes('up_next') || cleanId.includes('upnext');
       const upNextUsesShowPoster = isUpNextCatalog && catalogConfig?.metadata?.useShowPosterForUpNext === true;
       const { resolveCustomArtUrl, getPosterRatingApiKey, resolveLandscapePattern, posterShapeOf } = require('./utils/parseProps');
@@ -5528,6 +5532,7 @@ const catalogRoute = async function (req, res) {
       for (const meta of responseData.metas) {
         const ids = extractIdsFromMeta(meta);
         const type = meta.type || actualType;
+        config._btttrHistoryValue = btttrHistory ? btttrHistoryValue(ids, type, btttrHistory) : '';
         if (posterApplies) {
           if (proxyApiKey) {
             const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
@@ -5741,7 +5746,141 @@ const metaRoute = async function (req, res) {
       return respond(req, res, { meta: null });
     }
 
+    const ids = extractIdsFromMeta(result.meta);
+    const metaType = result.meta.type || type;
+    const btttrHistory = patternUsesBtttrHistory(
+      resolvePosterPattern(config),
+      config.customBackgroundUrlPattern,
+      config.customLandscapeUrlPattern,
+      config.customLogoUrlPattern,
+      resolveThumbnailPattern(config),
+    ) ? await getBtttrHistory(config) : null;
+    config._btttrHistoryValue = btttrHistory ? btttrHistoryValue(ids, metaType, btttrHistory) : '';
     if (req.params.beforeArt !== '1') applyMetaArt(result.meta, config, type, req.headers['user-agent'] || '');
+/*
+    {
+      const userAgent = req.headers['user-agent'] || '';
+      const host = process.env.HOST_NAME.startsWith('http') ? process.env.HOST_NAME : `https://${process.env.HOST_NAME}`;
+      const { resolveCustomArtUrl, resolvePosterPattern, resolveThumbnailPattern, getPosterRatingApiKey, resolveLandscapePattern, posterShapeOf } = require('./utils/parseProps');
+      const ids = extractIdsFromMeta(result.meta);
+      const metaType = result.meta.type || type;
+      const btttrHistory = patternUsesBtttrHistory(
+        resolvePosterPattern(config),
+        config.customBackgroundUrlPattern,
+        config.customLandscapeUrlPattern,
+        config.customLogoUrlPattern,
+        resolveThumbnailPattern(config),
+      ) ? await getBtttrHistory(config) : null;
+      config._btttrHistoryValue = btttrHistory ? btttrHistoryValue(ids, metaType, btttrHistory) : '';
+      const metaPosterPattern = config.enableRatingPostersForLibrary !== false ? resolvePosterPattern(config) : null;
+      const metaLandscapePattern = resolveLandscapePattern(config, metaPosterPattern);
+      // Apply poster pattern unless enableRatingPostersForLibrary is explicitly disabled
+      if (config.enableRatingPostersForLibrary !== false) {
+        if (metaPosterPattern) {
+          const proxyApiKey = config.usePosterProxy ? getPosterRatingApiKey(config) : null;
+          if (proxyApiKey) {
+            const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
+            if (proxyId) {
+              result.meta.poster = buildProxyArtUrl({ base: `${host}/poster-cache/proxy`, imageClass: 'poster', type: metaType, id: proxyId, fallback: result.meta.poster, ratingKey: proxyApiKey, lang: config.language });
+            }
+          } else {
+            const resolved = resolveCustomArtUrl(metaPosterPattern, ids, metaType, config, { userAgent, shape: posterShapeOf(result.meta) });
+            if (resolved) {
+              if (config.usePosterProxy) {
+                const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
+                if (proxyId) {
+                  result.meta.poster = buildProxyArtUrl({ base: `${host}/poster-cache/proxy`, imageClass: 'poster', type: metaType, id: proxyId, fallback: result.meta.poster, url: resolved });
+                }
+              } else {
+                result.meta.poster = resolved;
+              }
+            }
+          }
+        }
+      }
+      if (config.customBackgroundUrlPattern) {
+        const resolved = resolveCustomArtUrl(config.customBackgroundUrlPattern, ids, metaType, config, { userAgent, shape: 'landscape' });
+        if (resolved) {
+          if (config.usePosterProxy) {
+            const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
+            if (proxyId) {
+              result.meta.background = buildProxyArtUrl({ base: `${host}/poster-cache/proxy`, imageClass: 'background', type: metaType, id: proxyId, fallback: result.meta.background, url: resolved });
+            } else {
+              result.meta.background = resolved;
+            }
+          } else {
+            result.meta.background = resolved;
+          }
+        }
+      }
+      if (metaLandscapePattern) {
+        const resolved = resolveCustomArtUrl(metaLandscapePattern, ids, metaType, config, { userAgent, shape: 'landscape' });
+        if (resolved) {
+          if (config.usePosterProxy) {
+            const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
+            if (proxyId) {
+              result.meta.landscapePoster = buildProxyArtUrl({ base: `${host}/poster-cache/proxy`, imageClass: 'landscape', type: metaType, id: proxyId, fallback: result.meta.landscapePoster, url: resolved });
+            } else {
+              result.meta.landscapePoster = resolved;
+            }
+          } else {
+            result.meta.landscapePoster = resolved;
+          }
+        }
+      }
+      if (config.customLogoUrlPattern) {
+        const resolved = resolveCustomArtUrl(config.customLogoUrlPattern, ids, metaType, config, { userAgent });
+        if (resolved) {
+          if (config.usePosterProxy) {
+            const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
+            if (proxyId) {
+              result.meta.logo = buildProxyArtUrl({ base: `${host}/poster-cache/proxy`, imageClass: 'logo', type: metaType, id: proxyId, fallback: result.meta.logo, url: resolved });
+            } else {
+              result.meta.logo = resolved;
+            }
+          } else {
+            result.meta.logo = resolved;
+          }
+        }
+      }
+      // Apply thumbnail pattern to episode videos
+      const thumbnailPattern = resolveThumbnailPattern(config);
+      if (thumbnailPattern && result.meta.videos && Array.isArray(result.meta.videos)) {
+        for (const video of result.meta.videos) {
+          const idParts = video.id?.split(':');
+          if (idParts && idParts.length >= 3) {
+            const season = parseInt(idParts[idParts.length - 2], 10);
+            const episode = parseInt(idParts[idParts.length - 1], 10);
+            if (!isNaN(season) && !isNaN(episode)) {
+              // Unwrap blur proxy to get original thumbnail URL for {thumbnail} placeholder
+              let originalThumb = video.thumbnail || '';
+              if (originalThumb.includes('/api/image/blur?url=')) {
+                originalThumb = decodeURIComponent(originalThumb.split('/api/image/blur?url=')[1] || '');
+              }
+              const resolved = resolveCustomArtUrl(thumbnailPattern, ids, metaType, config, {
+                season,
+                episode,
+                blur: config.blurThumbs ? 'true' : 'false',
+                thumbnail: encodeURIComponent(originalThumb),
+                userAgent,
+              });
+              if (resolved) {
+                if (config.usePosterProxy) {
+                  const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
+                  // Episode thumbnails share the show's proxyId; the per-episode url param keeps the proxy cache/etag distinct.
+                  video.thumbnail = proxyId
+                    ? buildProxyArtUrl({ base: `${host}/poster-cache/proxy`, imageClass: 'background', type: metaType, id: proxyId, fallback: originalThumb, url: resolved })
+                    : resolved;
+                } else {
+                  video.thumbnail = resolved;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+*/
 
     /*else if (result && result.meta) {
       // cache wrap the ratings

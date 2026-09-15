@@ -115,6 +115,7 @@ function resolvePattern(pattern, ids, type, config, extra) {
     '{mdblist_key}': config?.apiKeys?.mdblist || '',
     '{fanart_key}': config?.apiKeys?.fanart || '',
     '{user_agent}': extra?.userAgent || '',
+    '{btttr_history}': extra?.btttrHistory || config?._btttrHistoryValue || '',
   };
 
   // Optional placeholders — resolve to empty string without failing
@@ -124,6 +125,11 @@ function resolvePattern(pattern, ids, type, config, extra) {
   };
 
   let url = pattern;
+  for (const [placeholder, value] of Object.entries(placeholders)) {
+    const name = placeholder.slice(1, -1);
+    const fallbackPattern = new RegExp(`\\{${name}\\?([^}]*)\\}`, 'g');
+    url = url.replace(fallbackPattern, (_match, fallback) => value || fallback);
+  }
   for (const group of new Set(pattern.match(/\{[a-z_]+(?:\|[a-z_]+)+\??\}/g) || [])) {
     const optional = group.endsWith('?}');
     const names = group.slice(1, optional ? -2 : -1).split('|');
