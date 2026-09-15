@@ -876,6 +876,13 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
     await Promise.race([work, new Promise<void>((resolve) => setTimeout(resolve, budget).unref?.())]);
   };
 
+  const prefetchSources = (req: any, descriptor: any, itemId: string, runtimeTicks: number | null): void => {
+    if (req.params?.listed) return;
+    void attachSources(req, { RunTimeTicks: runtimeTicks }, descriptor, itemId).catch((error: any) =>
+      logger.debug(`Background sources for ${itemId} unavailable: ${error?.message || error}`)
+    );
+  };
+
   // Subtitle addons answer IMDb ids, so an anime id is spelled that way first,
   // through the same anidb pivot the watch tracking uses.
   const imdbVideoId = async (videoId: string, type: 'movie' | 'series'): Promise<string> => {
@@ -2199,7 +2206,11 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
         return;
       }
 
-      await attachSourcesInTime(req, episode, descriptor, String(req.params.itemId));
+      if (req.params?.forceSources) {
+        await attachSourcesInTime(req, episode, descriptor, String(req.params.itemId));
+      } else {
+        prefetchSources(req, descriptor, String(req.params.itemId), episode.RunTimeTicks ?? null);
+      }
 
       const episodeConfig = await loadConfig(req);
       if (episodeConfig) {
@@ -2262,7 +2273,11 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
       }
 
       if (descriptor.k === 'movie') {
-        await attachSourcesInTime(req, item, descriptor, String(req.params.itemId));
+        if (req.params?.forceSources) {
+          await attachSourcesInTime(req, item, descriptor, String(req.params.itemId));
+        } else {
+          prefetchSources(req, descriptor, String(req.params.itemId), item.RunTimeTicks ?? null);
+        }
       }
 
       if (descriptor.k === 'series') {
