@@ -984,7 +984,12 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
 
   const attachSourcesInTime = async (req: any, item: any, descriptor: any, itemId: string): Promise<void> => {
     if (req.params?.listed) return;
-    if (!req.params?.forceSources && !asksForSources(req) && !(await resolveOnOpen(req))) return;
+    if (!req.params?.forceSources && !asksForSources(req) && !(await resolveOnOpen(req))) {
+      void attachSources(req, { RunTimeTicks: item.RunTimeTicks ?? null }, descriptor, itemId).catch((error: any) =>
+        logger.debug(`Background sources for ${itemId} unavailable: ${error?.message || error}`)
+      );
+      return;
+    }
     await attachSources(req, item, descriptor, itemId).catch((error: any) =>
       logger.debug(`Sources for ${itemId} unavailable: ${error?.message || error}`)
     );
