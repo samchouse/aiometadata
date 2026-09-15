@@ -298,7 +298,7 @@ export function ArtProviderSettings() {
             <CardDescription>
               {config.posterRatingProvider === 'rpdb' || config.posterRatingProvider === 'top'
                 ? 'Pre-filled with the default pattern for your selected provider. You can customize it if needed.'
-                : 'Override art with custom URL patterns. If a placeholder references an unavailable value, normal art is used instead.'}
+                : <>Override art with custom URL patterns. If a placeholder references an unavailable value, normal art is used instead. Use <code>{'{btttr_history?gr}'}</code> to supply a BTTTR fallback when no connected watch history has the title.</>}
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
