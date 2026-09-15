@@ -272,12 +272,25 @@ interface JellyfinDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   userUUID: string;
+  installUrl?: string | null;
 }
 
-export function JellyfinDialog({ open, onOpenChange, userUUID }: JellyfinDialogProps) {
+function installIdentifier(installUrl: string | null | undefined, fallback: string): string {
+  if (!installUrl) return fallback;
+
+  try {
+    const path = new URL(installUrl, window.location.origin).pathname;
+    const match = path.match(/^\/stremio\/([^/]+)\/manifest\.json$/);
+    return match ? decodeURIComponent(match[1]) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function JellyfinDialog({ open, onOpenChange, userUUID, installUrl }: JellyfinDialogProps) {
   const { config, setConfig, auth } = useConfig();
   const { requestSave, isSaving, isDirty, canSave } = useSave();
-  const serverAddress = `${window.location.origin}/jellyfin/${userUUID}`;
+  const serverAddress = `${window.location.origin}/jellyfin/${installIdentifier(installUrl ?? auth.installUrl, userUUID)}`;
   const mainName = config.jellyfinUserName || config.addonName || userUUID.slice(0, 8);
   const tags = useMemo(() => config.tags ?? [], [config.tags]);
   const users = useMemo(() => config.jellyfinUsers ?? [], [config.jellyfinUsers]);
