@@ -2786,7 +2786,7 @@ const MergedCatalogCard = ({
   const [newName, setNewName] = useState(catalog.name);
   const [newType, setNewType] = useState(catalog.displayType || catalog.type);
   const [showSettings, setShowSettings] = useState(false);
-  const [settingsMergeMode, setSettingsMergeMode] = useState<'interleaved' | 'sequential' | 'alternating'>(catalog.metadata?.mergeMode || 'interleaved');
+  const [settingsMergeMode, setSettingsMergeMode] = useState<'interleaved' | 'sequential' | 'alternating' | 'popularity'>(catalog.metadata?.mergeMode || 'interleaved');
   const [settingsPosterShape, setSettingsPosterShape] = useState<'inherit' | 'poster' | 'landscape'>(catalog.metadata?.posterShape || 'inherit');
   const sourcesShape = mergedSourcesShape(catalog, allCatalogs);
   const openSettings = () => {
@@ -3148,7 +3148,7 @@ const MergedCatalogCard = ({
           <div className="space-y-4 pt-2">
             <div>
               <Label>Merge Mode</Label>
-              <Select value={settingsMergeMode} onValueChange={(v: 'interleaved' | 'sequential' | 'alternating') => setSettingsMergeMode(v)}>
+              <Select value={settingsMergeMode} onValueChange={(v: 'interleaved' | 'sequential' | 'alternating' | 'popularity') => setSettingsMergeMode(v)}>
                 <SelectTrigger className="mt-1">
                   <SelectValue />
                 </SelectTrigger>
@@ -3156,6 +3156,7 @@ const MergedCatalogCard = ({
                   <SelectItem value="interleaved">Interleaved (A1 B1 A2 B2)</SelectItem>
                   <SelectItem value="sequential">Sequential (all A, then all B)</SelectItem>
                   <SelectItem value="alternating">Alternating (page 1 = A, page 2 = B)</SelectItem>
+                  <SelectItem value="popularity">Popularity (sort both, otherwise 1:1)</SelectItem>
                 </SelectContent>
               </Select>
             </div>
@@ -5215,7 +5216,7 @@ function CatalogsSettingsContent({
   const [mergeName, setMergeName] = useState('');
   const [mergeShowInHome, setMergeShowInHome] = useState(true);
   const [mergeDisplayType, setMergeDisplayType] = useState('');
-  const [mergeMode, setMergeMode] = useState<'interleaved' | 'sequential' | 'alternating'>('interleaved');
+  const [mergeMode, setMergeMode] = useState<'interleaved' | 'sequential' | 'alternating' | 'popularity'>('popularity');
 
   const openMergeDialog = () => {
     if (selectedCatalogs.some(c => c.source === 'merged')) {
@@ -5231,7 +5232,7 @@ function CatalogsSettingsContent({
     setMergeName(baseName);
     setMergeShowInHome(true);
     setMergeDisplayType('');
-    setMergeMode('interleaved');
+    setMergeMode('popularity');
     setShowMergeDialog(true);
   };
 
@@ -6025,6 +6026,18 @@ function CatalogsSettingsContent({
                 >
                   <p className="text-sm font-medium">Interleaved</p>
                   <p className="text-xs text-muted-foreground">Mix items from all sources (A B A B)</p>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setMergeMode('popularity')}
+                  className={`flex-1 rounded-md border p-2.5 text-left transition-colors ${
+                    mergeMode === 'popularity'
+                      ? 'border-primary bg-primary/10'
+                      : 'border-border hover:border-primary/50'
+                  }`}
+                >
+                  <p className="text-sm font-medium">Popularity Balanced</p>
+                  <p className="text-xs text-muted-foreground">Sort both sources by popularity, or use 1:1 mixing.</p>
                 </button>
                 <button
                   type="button"
