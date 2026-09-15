@@ -107,6 +107,13 @@ export interface CatalogConfig {
       source?: 'tmdb' | 'tvdb' | 'anilist' | 'simkl' | 'mal' | 'mdblist';
       mediaType?: 'movie' | 'tv' | 'series' | 'anime';
       params?: Record<string, string | number | boolean>;
+      tieredRecency?: {
+        enabled?: boolean;
+        tierCount?: number;
+        recencyPreset?: 'this_month' | 'last_6_months' | 'last_year' | 'last_2_years' | 'this_year';
+        customReleaseFrom?: string | null;
+        onlyReleased?: boolean;
+      };
       formState?: Record<string, any>;
     };
     discoverParams?: Record<string, string | number | boolean>;
@@ -121,7 +128,7 @@ export interface CatalogConfig {
       originalEnabled: boolean;
       originalShowInHome: boolean;
     }>;
-    mergeMode?: 'interleaved' | 'sequential' | 'alternating';
+    mergeMode?: 'interleaved' | 'sequential' | 'alternating' | 'popularity';
     // MovieLens-specific metadata
     sortBy?: string;
     sortDirection?: string;
