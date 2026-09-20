@@ -123,3 +123,14 @@ addon/lib/buildInfo.js
 
 # Generated from package-lock.json and node_modules on every build (npm run notices)
 THIRD_PARTY_NOTICES.txt
+
+# Devenv
+.devenv*
+devenv.local.nix
+devenv.local.yaml
+
+# direnv
+.direnv
+
+# pre-commit
+.pre-commit-config.yaml
