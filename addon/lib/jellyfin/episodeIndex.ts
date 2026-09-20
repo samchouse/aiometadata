@@ -184,14 +184,25 @@ export async function refreshSeriesIndex(userUUID: string, metaId: string): Prom
   return config ? build(userUUID, config, metaId) : null;
 }
 
-/** Builds whatever the Next Up candidates of a configuration lack, off the request path. */
+/** Builds the episode indexes used by Next Up and Upcoming off the request path. */
 export async function warmNextUpIndex(userUUID: string, config: any): Promise<number> {
   const { watchedSnapshot, ownNextUpRows } = require('./watched');
+  const { watchlistEntries } = require('./watchlist');
   const { profileKey } = require('./profiles');
   const { mapWithConcurrency } = require('../../utils/concurrency');
-  const snapshot = await watchedSnapshot(userUUID, config, { patient: true });
-  const own = await ownNextUpRows(userUUID, profileKey(config));
-  const metaIds = [...new Set([...own, ...snapshot.nextUp].map((row: any) => String(row.metaId)))];
+  const [snapshot, own, watchlist] = await Promise.all([
+    watchedSnapshot(userUUID, config, { patient: true }),
+    ownNextUpRows(userUUID, profileKey(config)),
+    watchlistEntries(userUUID, config).catch(() => ({ entries: [] })),
+  ]);
+  const listed = Array.isArray(watchlist) ? watchlist : (watchlist?.entries || []);
+  const rows = [
+    ...own,
+    ...snapshot.nextUp,
+    ...snapshot.following,
+    ...listed.filter((row: any) => row.mediaType !== 'movie'),
+  ];
+  const metaIds = [...new Set(rows.map((row: any) => String(row.metaId)))];
   await warmSeriesIndex(userUUID, metaIds);
   const stored = await configFor(userUUID);
   if (!stored) return 0;
