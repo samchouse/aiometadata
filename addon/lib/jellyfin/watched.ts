@@ -446,6 +446,13 @@ async function buildMdblist(apiKey: string, config: any): Promise<RawSnapshot> {
     at: [...at],
     series: [...series],
     nextUp: nextUp.sort((a, b) => b.lastWatchedAt - a.lastWatchedAt),
+    // MDBList's Upcoming feed applies its own filters. Preserve every show in
+    // watched history so Jellyfin's metadata and caught-up rules decide which
+    // personalized shows belong on its Upcoming row.
+    following: [...latest.values()].map(({ resolved }) => ({
+      metaId: resolved.metaId,
+      mediaType: resolved.mediaType,
+    })),
     dropped: [...dropped],
   };
 }
@@ -764,7 +771,7 @@ async function mdblistSnapshot(userUUID: string, apiKey: string, config: any, fo
   try {
     const { cacheWrapGlobal, classifyResultAllowEmpty } = require('../getCache');
     const raw: RawSnapshot = await cacheWrapGlobal(
-      `jellyfin_watched_mdblist_v3:${key}`,
+      `jellyfin_watched_mdblist_v4:${key}`,
       () => buildMdblist(apiKey, config),
       envInt('JELLYFIN_WATCHED_REDIS_TTL', 24 * 60 * 60, 60),
       { upstream: true, resultClassifier: classifyResultAllowEmpty }
@@ -776,7 +783,7 @@ async function mdblistSnapshot(userUUID: string, apiKey: string, config: any, fo
       at: new Map(raw?.at ?? []),
       series: new Map(raw?.series ?? []),
       nextUp: raw?.nextUp ?? [],
-      following: [],
+      following: raw?.following ?? [],
       dropped: new Set(raw?.dropped ?? []),
       fingerprint: key,
     };

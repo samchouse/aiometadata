@@ -125,14 +125,24 @@ export async function refreshSeriesIndex(userUUID: string, metaId: string): Prom
   return build(userUUID, metaId);
 }
 
-/** Builds whatever the Next Up candidates of a configuration lack, off the request path. */
+/** Builds the episode indexes used by Next Up and Upcoming off the request path. */
 export async function warmNextUpIndex(userUUID: string, config: any): Promise<number> {
   const { watchedSnapshot, ownNextUpRows } = require('./watched');
+  const { watchlistEntries } = require('./watchlist');
   const { profileKey } = require('./profiles');
   const { mapWithConcurrency } = require('../../utils/concurrency');
-  const snapshot = await watchedSnapshot(userUUID, config);
-  const own = await ownNextUpRows(userUUID, profileKey(config));
-  const metaIds = [...new Set([...own, ...snapshot.nextUp].map((row: any) => String(row.metaId)))];
+  const [snapshot, own, listed] = await Promise.all([
+    watchedSnapshot(userUUID, config),
+    ownNextUpRows(userUUID, profileKey(config)),
+    watchlistEntries(userUUID, config),
+  ]);
+  const rows = [
+    ...own,
+    ...snapshot.nextUp,
+    ...snapshot.following,
+    ...listed.filter((row: any) => row.mediaType !== 'movie'),
+  ];
+  const metaIds = [...new Set(rows.map((row: any) => String(row.metaId)))];
   await warmSeriesIndex(userUUID, metaIds);
   const missing = metaIds.filter((id) => !memory.has(keyFor(userUUID, id)));
   await mapWithConcurrency(missing, envInt('JELLYFIN_SHELF_META_CONCURRENCY', 4, 1), (id: string) => build(userUUID, id).catch(() => null));

@@ -2,7 +2,7 @@ import express from 'express';
 import consola from 'consola';
 import { envInt } from '../../utils/envNumber';
 import { mapWithConcurrency } from '../../utils/concurrency';
-import { randomUUID, timingSafeEqual } from 'crypto';
+import { createHash, randomUUID, timingSafeEqual } from 'crypto';
 import {
   attachJellyfinContext,
   clientInfo,
@@ -2190,7 +2190,8 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
     return found;
   };
 
-  // A new season of a show the user follows, and a watchlist film not out yet.
+  // The next episode of a personalized, caught-up show, or the confirmed home
+  // release of a watchlist film.
   router.get('/Shows/Upcoming', async (req: any, res: any) => {
     const userUUID = req.params.userUUID;
     const config = await loadConfig(req);
@@ -2219,20 +2220,30 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
     const premiereAt = (item: any): number => Date.parse(item?.PremiereDate || '');
     const within = (at: number): boolean => Number.isFinite(at) && at > now && at <= horizon;
 
-    const [snapshot, resume, own, caughtUp] = await Promise.all([
+    const [snapshot, resume, own, caughtUp, listed] = await Promise.all([
       watchedSnapshot(userUUID, config),
       resumeSnapshot(userUUID, config),
       ownNextUpRows(userUUID, profile),
       upcomingFollowed(config, days),
+      watchlistEntries(userUUID, config),
     ]);
-    // Tracker-followed shows are all checked; locally known ones are capped.
+    const listedEntries = listed.entries;
+
+    // Tracker library and watchlist membership define the personalized
+    // universe. Only shows known exclusively from this server are capped.
     const shows = new Map<string, string>();
-    for (const row of [...caughtUp, ...snapshot.following]) {
+    const trackerRows = [
+      ...caughtUp,
+      ...snapshot.following,
+      ...snapshot.nextUp,
+      ...listedEntries.filter((row) => row.mediaType !== 'movie'),
+    ];
+    for (const row of trackerRows) {
       if (!shows.has(row.metaId)) shows.set(row.metaId, row.mediaType);
     }
     let local = 0;
     const localCap = envInt('JELLYFIN_UPCOMING_LOCAL_SHOWS', 60, 0);
-    for (const row of [...own, ...snapshot.nextUp, ...resume.filter((r) => r.kind === 'episode')].filter((r) => !snapshot.dropped.has(r.metaId))) {
+    for (const row of [...own, ...resume.filter((r) => r.kind === 'episode')]) {
       if (shows.has(row.metaId)) continue;
       if (local >= localCap) break;
       shows.set(row.metaId, row.mediaType);
@@ -2242,87 +2253,116 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
     const named = new Map<string, NextUpRow>();
     for (const row of snapshot.nextUp) if (row.airsAt) named.set(row.metaId, row);
 
-    const seen = new Set<string>();
-    const premieres: any[] = [];
-    await warmSeriesIndex(userUUID, followed.map(([metaId]) => metaId));
-    await mapWithConcurrency(followed, shelfConcurrency(), async ([metaId, mediaType]) => {
-      const meta = await seriesIndex(userUUID, metaId);
-      if (!meta) return;
-      const identity = meta._tmdbId ? `tmdb:${meta._tmdbId}` : meta._imdbId ? `imdb:${meta._imdbId}` : String(meta.id);
-      if (seen.has(identity)) return;
-      seen.add(identity);
-      const seriesId = encodeJellyfinId({ k: 'series', t: mediaType, i: String(meta.id) });
-      const episodes = buildEpisodes(meta, mediaType, seriesId, serverId, null)
-        .filter((episode: any) => episode.ParentIndexNumber !== 0);
-      const row = named.get(metaId);
-      if (row) {
-        const episode = row.videoId
-          ? await locateEpisode(episodes, row.videoId, mediaType, String(meta.id))
-          : episodes.find((e: any) => e.IndexNumber === row.episode && (row.season === null || e.ParentIndexNumber === row.season));
-        if (within(row.airsAt as number)) {
-          if (episode) {
-            episode.PremiereDate = new Date(row.airsAt as number).toISOString();
-            premieres.push(episode);
-          }
+    const fingerprint = createHash('sha256').update(JSON.stringify({
+      configVersion: config?.configVersion ?? null,
+      days,
+      profile,
+      watched: snapshot.fingerprint,
+      shows: followed,
+      listed: listedEntries.map((row) => [row.metaId, row.mediaType, row.addedAt]),
+    })).digest('hex').slice(0, 20);
+    const memoKey = `${userUUID}:upcoming:${fingerprint}`;
+
+    const ordered = await memoNextUp(userUUID, memoKey, async () => {
+      const stats = {
+        tracker: new Set(trackerRows.map((row) => row.metaId)).size,
+        local,
+        noMeta: 0,
+        duplicate: 0,
+        behind: 0,
+        noFuture: 0,
+        movieNoMeta: 0,
+        movieNoTmdb: 0,
+        movieNoHomeDate: 0,
+      };
+
+      const seen = new Set<string>();
+      const premieres: any[] = [];
+      await warmSeriesIndex(userUUID, followed.map(([metaId]) => metaId));
+      await mapWithConcurrency(followed, shelfConcurrency(), async ([metaId, mediaType]) => {
+        const meta = await seriesIndex(userUUID, metaId);
+        if (!meta) {
+          stats.noMeta += 1;
           return;
         }
-        // Aired and, by the tracker, unwatched: Next Up's business unless the table says it was played.
-        if (episode) await applyWatchedState([episode], snapshot, userUUID, profile);
-        if (!episode || episode.UserData?.Played !== true) return;
-      }
-      const next = episodes
-        .filter((episode: any) => within(premiereAt(episode)))
-        .sort((a: any, b: any) => premiereAt(a) - premiereAt(b))[0];
-      if (!next) return;
-      // Only a show the user is caught up on: an aired episode still unwatched
-      // is Next Up's business. The snapshot answers for most; the table is
-      // asked only about aired episodes it does not hold.
-      const aired = episodes.filter((episode: any) => {
-        const at = premiereAt(episode);
-        return Number.isFinite(at) && at <= now;
-      });
-      const { stremioIdFor } = require('./idsCodec');
-      const unknown: any[] = [];
-      const held: string[] = [];
-      for (const episode of aired) {
-        const d = await decodeJellyfinId(String(episode.Id));
-        const videoId = d ? stremioIdFor(d) : null;
-        if (!videoId || !isWatched(snapshot, videoId)) unknown.push(episode);
-        else held.push(videoId);
-      }
-      if (unknown.length) {
-        await applyWatchedState(unknown, snapshot, userUUID, profile);
-        if (unknown.some((episode: any) => episode.UserData?.Played !== true)) return;
-      }
-      // A watch the tracker holds that the table unmarked by hand still counts as unplayed.
-      if (held.length) {
-        const database: any = require('../database');
-        const rows: Map<string, any> = await database.getPlaystates(userUUID, held, profile);
-        for (const row of rows.values()) if (row && !row.played) return;
-      }
-      await applyWatchedState([next], snapshot, userUUID, profile);
-      if (next.UserData?.Played !== true) premieres.push(next);
-    });
-
-    const watchlists = (await getCatalogs(userUUID, config)).filter(
-      (catalog: any) => /\.watchlist\b/.test(catalog.id) && collectionTypeFor(catalog.type) === 'movies'
-    );
-    const films: any[] = [];
-    await mapWithConcurrency(watchlists, 2, async (catalog: any) => {
-      const window = await fetchWindow(userUUID, catalog, 0, envInt('JELLYFIN_UPCOMING_WATCHLIST_LIMIT', 100, 1), {}, undefined, profileTags(config))
-        .catch(() => ({ items: [] as any[], hasMore: false }));
-      for (const meta of window.items) {
-        const item = metaToBaseItem(meta, catalog.type, serverId, null);
-        if (item.Type === 'Movie' && within(premiereAt(item)) && !seen.has(item.Id)) {
-          seen.add(item.Id);
-          films.push(item);
+        const identity = meta._tmdbId ? `tmdb:${meta._tmdbId}` : meta._imdbId ? `imdb:${meta._imdbId}` : String(meta.id);
+        if (seen.has(identity)) {
+          stats.duplicate += 1;
+          return;
         }
-      }
+        seen.add(identity);
+        const seriesId = encodeJellyfinId({ k: 'series', t: mediaType, i: String(meta.id) });
+        // An already-aired unwatched episode belongs in Next Up, even when a
+        // tracker advertises a later episode for the same show.
+        const episodes = buildEpisodes(meta, mediaType, seriesId, serverId, null)
+          .filter((episode: any) => episode.ParentIndexNumber !== 0);
+        await applyWatchedState(episodes, snapshot, userUUID, profile);
+        const unplayed = (episode: any) => episode.UserData?.Played !== true;
+        const aired = episodes.filter((episode: any) => {
+          const at = premiereAt(episode);
+          return Number.isFinite(at) && at <= now;
+        });
+        if (aired.some(unplayed)) {
+          stats.behind += 1;
+          return;
+        }
+
+        const next = episodes
+          .filter((episode: any) => within(premiereAt(episode)) && unplayed(episode))
+          .sort((a: any, b: any) => premiereAt(a) - premiereAt(b))[0];
+        if (next) premieres.push(next);
+        else stats.noFuture += 1;
+      });
+
+      const films: any[] = [];
+      const movieEntries = listedEntries.filter((row) => row.mediaType === 'movie');
+      await mapWithConcurrency(movieEntries, shelfConcurrency(), async (entry) => {
+        const meta = await fetchMeta(userUUID, 'movie', entry.metaId);
+        if (!meta) {
+          stats.movieNoMeta += 1;
+          return;
+        }
+        const metaId = String(meta.id || entry.metaId);
+        const tmdbId = meta._tmdbId || (/^tmdb:\d+$/.test(metaId) ? metaId.slice(5) : null);
+        if (!tmdbId) {
+          stats.movieNoTmdb += 1;
+          return;
+        }
+        try {
+          const { movieReleaseDates } = require('../getTmdb');
+          const { getReleaseAvailability } = require('../../utils/releaseAvailability');
+          const releaseDates = await movieReleaseDates(String(tmdbId), config);
+          const availability = getReleaseAvailability({ app_extras: { releaseDates } });
+          const homeAt = Date.parse(availability?.earliestHomeReleaseDate || '');
+          if (!within(homeAt)) {
+            stats.movieNoHomeDate += 1;
+            return;
+          }
+          const item = metaToBaseItem(meta, entry.mediaType, serverId, null);
+          if (seen.has(item.Id)) {
+            stats.duplicate += 1;
+            return;
+          }
+          seen.add(item.Id);
+          item.PremiereDate = new Date(homeAt).toISOString();
+          item.UserData = { ...item.UserData, IsFavorite: true };
+          films.push(item);
+        } catch {
+          stats.movieNoHomeDate += 1;
+        }
+      });
+
+      const found = [...premieres, ...films]
+        .filter(keepsUnderProfileCap(config))
+        .sort((a, b) => premiereAt(a) - premiereAt(b));
+      logger.info(`Upcoming built for ${userUUID}: ${found.length} items from ${stats.tracker} tracker and ${stats.local} local show candidates, ${movieEntries.length} watchlist films (${stats.behind} behind, ${stats.noFuture} without a future episode, ${stats.noMeta} show metas missing, ${stats.movieNoMeta} movie metas missing, ${stats.movieNoTmdb} movies without TMDB ids, ${stats.movieNoHomeDate} movies without a home release in the window, ${stats.duplicate} duplicates)`);
+      return found;
     });
 
-    return [...premieres, ...films]
-      .filter(keepsUnderProfileCap(config))
-      .sort((a, b) => premiereAt(a) - premiereAt(b));
+    // A cached item may cross its air time between page requests. Do not keep
+    // presenting it as upcoming until the short completed-row cache expires.
+    const current = ordered.filter((item) => within(premiereAt(item)));
+    return current;
   };
 
   router.get(['/Items/:itemId/Similar', '/Movies/:itemId/Similar', '/Shows/:itemId/Similar'], async (req: any, res: any) => {

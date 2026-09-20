@@ -164,10 +164,10 @@ Not every tracker holds every kind of state:
 
 | | Paused positions | Watch history | Next Up | Upcoming | Watchlist |
 |---|---|---|---|---|---|
-| MDBList | yes | yes | yes, its own Up Next | yes | movies, series |
-| Simkl | yes | yes | shows in **Watching** | | movies, series, anime |
-| PublicMetaDB | yes | yes | derived from history | | |
-| AniList, MyAnimeList | | | | | anime |
+| MDBList | yes | yes | yes, its own Up Next | watched library, Up Next and its Upcoming hint | movies, series |
+| Simkl | yes | yes | shows in **Watching** | shows in **Watching** | movies, series, anime |
+| PublicMetaDB | yes | yes | derived from history | recently watched shows | |
+| AniList, MyAnimeList | | | | watchlisted anime | anime |
 
 ### The shelves
 
@@ -175,7 +175,7 @@ Not every tracker holds every kind of state:
 
 **Next Up** lists the next unwatched episode of shows in progress. From MDBList it is MDBList's own Up Next list, read `JELLYFIN_NEXTUP_MDBLIST_PAGES` pages deep; from Simkl it is the next episode of every show in the Watching list, so a planned, on-hold or dropped show never shows up at its first episode; from PublicMetaDB and from plays through this server it is derived from the last finished episode, looking back `JELLYFIN_NEXTUP_OWN_DAYS` days. Specials and unaired episodes are never offered. A candidate that turns out to be finished, unaired or unknown to the metadata is skipped and the page is filled from the ones after it; the reason is in the debug log.
 
-**Upcoming** lists episodes airing within `JELLYFIN_UPCOMING_DAYS` days for every show MDBList lists as followed, plus up to `JELLYFIN_UPCOMING_LOCAL_SHOWS` shows known only from plays here, plus watchlist films not yet released. The followed list is kept `JELLYFIN_UPCOMING_TTL` seconds.
+**Upcoming** builds its candidates from the selected tracker's personalized library, Up Next state and watchlisted series instead of trusting MDBList's filtered Upcoming feed alone. It checks each candidate's metadata and shows its earliest episode inside `JELLYFIN_UPCOMING_DAYS` only when every already-aired regular episode is watched; otherwise the earlier episode belongs in Next Up. Shows known only from local plays are limited by `JELLYFIN_UPCOMING_LOCAL_SHOWS`, while tracker candidates are not. Watchlist films join the same row only when TMDB confirms a digital, physical or TV release inside the window; a theatrical date alone does not qualify.
 
 **Watched ticks** on a film or episode mean the tracker's history, or the playstate table, lists it. A series shows its progress as watched out of aired, counting only regular episodes that have already aired, so a show with specials or a season still airing can reach a full tick. Ticks are applied on library pages, Latest rows and search results alike.
 
@@ -278,10 +278,9 @@ All of these are in the dashboard under **Server**, or as environment variables,
 | `JELLYFIN_NEXTUP_MDBLIST_PAGES` | `5` | Pages of a hundred read from MDBList's Up Next. |
 | `JELLYFIN_NEXTUP_OWN_DAYS` | `120` | How far back Next Up looks for episodes finished through this server. |
 | `JELLYFIN_UPCOMING_DAYS` | `90` | How far ahead Upcoming looks. |
-| `JELLYFIN_UPCOMING_TTL` | `21600` | How long the list of followed shows is kept. |
-| `JELLYFIN_UPCOMING_LOCAL_SHOWS` | `60` | Shows known only from local plays checked for an upcoming episode. |
-| `JELLYFIN_UPCOMING_WATCHLIST_LIMIT` (env) | `100` | Watchlist films checked for a release date. |
-| `JELLYFIN_WATCHLIST_MEMO_TTL` | `60` | How long the merged watchlist is held in memory after a read, on top of the watchlist catalogs' cache. |
+| `JELLYFIN_UPCOMING_TTL` | `21600` | How long MDBList's filtered Upcoming hint is kept; watched-library and watchlist candidates are gathered separately. |
+| `JELLYFIN_UPCOMING_LOCAL_SHOWS` | `60` | Shows known only from local plays checked for an upcoming episode; tracker library and watchlist shows are not capped by it. |
+| `JELLYFIN_WATCHLIST_TTL` (env) | `300` | How long the merged watchlist is kept. |
 | `WATCH_STATE_PULL_TTL` | `300` | How long a front end reading watch state from the addon may reuse an answer. |
 | `WATCH_STATE_PULL_ITEMS` | `100` | In-progress titles a watch state read returns. |
 
@@ -291,7 +290,7 @@ Clients differ in what they ask for, and a few things are worth knowing when a r
 
 - **Latest rows** are asked without paging. A client that asks for twenty on the home screen and fifty when the library is opened shows at most that many, whatever the catalog holds; open the library itself to browse it all.
 - **Next Up** with resumable episodes excluded, as some clients ask, shows only episodes not yet started; a half-watched one is in Continue Watching instead.
-- **Upcoming** has no window parameter in the Jellyfin API; `JELLYFIN_UPCOMING_DAYS` sets it server-side.
+- **Upcoming** has no window parameter in the Jellyfin API; `JELLYFIN_UPCOMING_DAYS` sets it server-side. It combines the next episode of caught-up shows in the personalized tracker library and watchlist with watchlist films whose confirmed home release falls inside the window.
 - **Favourites** is the watchlist. Not every client offers a remove-from-favourites action on every screen; the title page's heart is the reliable place.
 - **Playlists** are not served. A client that offers to play a favourite rather than open it is treating the row as a playlist; use the Favourites view.
 - **Web clients** cache the server's views; a library that was just tagged away or added appears after a reload.
