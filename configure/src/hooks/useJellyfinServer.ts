@@ -44,6 +44,19 @@ export function useJellyfinServer(active = true): JellyfinServer {
   };
 }
 
-export function jellyfinServerAddress(baseUrl: string, userUUID: string): string {
-  return `${baseUrl.replace(/\/+$/, '')}/jellyfin/${userUUID}`;
+export function installIdentifier(installUrl: string | null | undefined, fallback: string): string {
+  if (!installUrl) return fallback;
+
+  try {
+    const path = new URL(installUrl, window.location.origin).pathname;
+    const match = path.match(/^\/stremio\/([^/]+)\/manifest\.json$/);
+    return match ? decodeURIComponent(match[1]) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+export function jellyfinServerAddress(baseUrl: string, userUUID: string, installUrl?: string | null): string {
+  const serverId = installIdentifier(installUrl, userUUID);
+  return `${baseUrl.replace(/\/+$/, '')}/jellyfin/${serverId}`;
 }

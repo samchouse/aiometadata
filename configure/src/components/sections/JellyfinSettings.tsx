@@ -104,7 +104,7 @@ export function JellyfinSettings() {
   const { savedConfig, isDirty, requestSave, isSaving, canSave } = useSave();
   const server = useJellyfinServer();
   const userUUID = savedConfig?.userUUID ?? (auth.authenticated ? auth.userUUID : null) ?? null;
-  const address = userUUID ? jellyfinServerAddress(server.baseUrl, userUUID) : '';
+  const address = userUUID ? jellyfinServerAddress(server.baseUrl, userUUID, savedConfig?.installUrl ?? auth.installUrl) : '';
 
   const resolveForced = server.resolveOnOpen === 'always' ? true : server.resolveOnOpen === 'never' ? false : null;
   const upcomingForced = server.upcomingMode === 'caught-up' || server.upcomingMode === 'airing' ? server.upcomingMode : null;

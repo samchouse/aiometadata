@@ -53,7 +53,7 @@ import { dashedGuid, encodeJellyfinId, normaliseJellyfinId, parseStremioId, stre
 import { canPlay, coalesce, fetchStreams, fileFor, languageCode, languageName, mediaSourceFor, normaliseStreamBase, forgetDuration, placeholderMediaSource, recallDuration, recallFailure, recallIssued, recallStreams, rememberDuration, rememberIssued, rememberFailure, rememberStreams, runtimeTicksFrom, streamClient, streamsState, streamUserAgent, toNotice, toPlayable, type StreamClient } from './streams';
 import { fetchAddonSubtitles, formatOf, pickSubtitles, recallOffered, rememberOffered, subtitleBody, subtitleCodecFor, subtitleExtensionOf, subtitleFormatFor, subtitleLanguage, type SubtitleTrack } from './subtitles';
 import { subtitleLanguageName, subtitleMenuTitles } from './subtitles';
-import { heldNextUp, memoNextUp, resumeSnapshot, resumeUserData } from './resume';
+import { continueWatchingRows, heldNextUp, memoNextUp, resumeSnapshot, resumeUserData } from './resume';
 import { animeSequels } from './sequels';
 import { listSeasonFingerprints, saveSeasonFingerprint } from './fingerprints';
 import { isAnimeTitle, showIdentity } from './canonicalIds';
@@ -3410,13 +3410,13 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
     };
     const included = typesOf(req.query.IncludeItemTypes ?? req.query.includeItemTypes);
     const leftOut = typesOf(req.query.ExcludeItemTypes ?? req.query.excludeItemTypes);
-    const rows = (await resumeSnapshot(userUUID, config))
+    const rows = continueWatchingRows((await resumeSnapshot(userUUID, config))
       .filter((row) => row.kind === 'movie' || !watched.dropped.has(row.metaId))
       .filter((row) => !animeOnly || isAnimeTitle(row.metaId, row.kind === 'movie' ? 'movie' : 'series'))
       .filter((row) => {
         const type = row.kind === 'movie' ? 'Movie' : 'Episode';
         return (!included || included.has(type)) && !leftOut?.has(type);
-      });
+      }));
     if (!rows.length) {
       res.json(itemList([], 0, startIndex));
       return;
@@ -4020,11 +4020,40 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
     const serverId = serverIdFor(userUUID);
     const filmLimit = envInt('JELLYFIN_UPCOMING_WATCHLIST_LIMIT', 100, 1);
     const films: any[] = [];
-    const addFilm = (meta: any, type: string) => {
+    const addFilm = async (meta: any, type: string) => {
       const item = metaToBaseItem(meta, type, serverId, null);
-      if (item.Type !== 'Movie' || !keep(Date.parse(item?.PremiereDate || '')) || seen.has(item.Id)) return;
+      if (item.Type !== 'Movie' || seen.has(item.Id)) return;
       if (keepsAnimeOnly(config) && !isAnimeTitle(String(meta.id), 'movie')) return;
+
+      let releaseAt = Date.parse(item?.PremiereDate || '');
+      const { extractIdsFromMeta } = require('../../utils/metaIds');
+      const ids = extractIdsFromMeta(meta);
+      let tmdbId = ids.tmdbId;
+      if (!tmdbId && ids.imdbId) {
+        const { resolveAllIds } = require('../id-resolver');
+        const resolved = await resolveAllIds('movie', ids.imdbId).catch(() => null);
+        if (resolved?.tmdbId) tmdbId = String(resolved.tmdbId);
+      }
+
+      if (tmdbId) {
+        try {
+          const { movieReleaseDates } = require('../getTmdb');
+          const { getReleaseAvailability } = require('../../utils/releaseAvailability');
+          const releaseDates = await movieReleaseDates(String(tmdbId), config);
+          const availability = getReleaseAvailability({ app_extras: { releaseDates } });
+          const homeAt = Date.parse(availability?.earliestHomeReleaseDate || '');
+          if (Number.isFinite(homeAt)) {
+            releaseAt = homeAt;
+            item.PremiereDate = new Date(homeAt).toISOString();
+          } else if (availability?.hasReleaseDateData) {
+            return;
+          }
+        } catch {}
+      }
+
+      if (!keep(releaseAt)) return;
       seen.add(item.Id);
+      item.UserData = { ...item.UserData, IsFavorite: true };
       films.push(item);
     };
     const watchlists = (await getCatalogs(userUUID, config)).filter(
@@ -4034,8 +4063,8 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
       const window = await fetchWindow(userUUID, catalog, 0, filmLimit, {}, undefined, profileTags(config))
         .catch(() => ({ items: [] as any[], hasMore: false }));
       for (const meta of window.items) {
-        if (catalog.type !== 'all') addFilm(meta, catalog.type);
-        else if (meta?.type === 'movie') addFilm(meta, 'movie');
+        if (catalog.type !== 'all') await addFilm(meta, catalog.type);
+        else if (meta?.type === 'movie') await addFilm(meta, 'movie');
       }
     });
     const listed = (await watchlistEntries(userUUID, config, filmLimit).catch(() => ({ entries: [] as any[] }))).entries
@@ -4043,7 +4072,7 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
       .slice(0, filmLimit);
     await mapWithConcurrency(listed, shelfConcurrency(), async (entry: any) => {
       const meta = await fetchMeta(userUUID, 'movie', entry.metaId).catch(() => null);
-      if (meta) addFilm(meta, 'movie');
+      if (meta) await addFilm(meta, 'movie');
     });
     return films;
   };
