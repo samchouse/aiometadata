@@ -53,7 +53,7 @@ import { dashedGuid, encodeJellyfinId, normaliseJellyfinId, parseStremioId, stre
 import { canPlay, coalesce, fetchStreams, fileFor, languageCode, languageName, mediaSourceFor, normaliseStreamBase, forgetDuration, placeholderMediaSource, recallDuration, recallFailure, recallIssued, recallStreams, rememberDuration, rememberIssued, rememberFailure, rememberStreams, runtimeTicksFrom, streamClient, streamsState, streamUserAgent, toNotice, toPlayable, type StreamClient } from './streams';
 import { fetchAddonSubtitles, formatOf, pickSubtitles, recallOffered, rememberOffered, subtitleBody, subtitleCodecFor, subtitleExtensionOf, subtitleFormatFor, subtitleLanguage, type SubtitleTrack } from './subtitles';
 import { subtitleLanguageName, subtitleMenuTitles } from './subtitles';
-import { heldNextUp, memoNextUp, resumeSnapshot, resumeUserData } from './resume';
+import { continueWatchingRows, heldNextUp, memoNextUp, resumeSnapshot, resumeUserData } from './resume';
 import { animeSequels } from './sequels';
 import { listSeasonFingerprints, saveSeasonFingerprint } from './fingerprints';
 import { isAnimeTitle, showIdentity } from './canonicalIds';
@@ -3181,13 +3181,13 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
     };
     const included = typesOf(req.query.IncludeItemTypes ?? req.query.includeItemTypes);
     const leftOut = typesOf(req.query.ExcludeItemTypes ?? req.query.excludeItemTypes);
-    const rows = (await resumeSnapshot(userUUID, config))
+    const rows = continueWatchingRows((await resumeSnapshot(userUUID, config))
       .filter((row) => row.kind === 'movie' || !watched.dropped.has(row.metaId))
       .filter((row) => !animeOnly || isAnimeTitle(row.metaId, row.kind === 'movie' ? 'movie' : 'series'))
       .filter((row) => {
         const type = row.kind === 'movie' ? 'Movie' : 'Episode';
         return (!included || included.has(type)) && !leftOut?.has(type);
-      });
+      }));
     if (!rows.length) {
       res.json(itemList([], 0, startIndex));
       return;
