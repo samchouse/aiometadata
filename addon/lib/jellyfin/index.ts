@@ -31,7 +31,7 @@ import { buildEpisodes, buildSeasons, withSeasonAnimeIds, fetchCatalogPage, fetc
 import { dashedGuid, encodeJellyfinId, normaliseJellyfinId, parseStremioId, stremioIdFor } from './ids';
 import { coalesce, fetchStreams, fileFor, languageCode, languageName, mediaSourceFor, normaliseStreamBase, forgetDuration, placeholderMediaSource, recallDuration, recallFailure, recallIssued, recallStreams, rememberDuration, rememberFailure, rememberStreams, runtimeTicksFrom, streamUserAgent, toNotice, toPlayable } from './streams';
 import { fetchAddonSubtitles, formatOf, pickSubtitles, recallOffered, rememberOffered, subtitleBody, subtitleCodecFor, subtitleExtensionOf, subtitleFormatFor, subtitleLanguage, type SubtitleTrack } from './subtitles';
-import { memoNextUp, resumeSnapshot, resumeUserData } from './resume';
+import { continueWatchingRows, memoNextUp, resumeSnapshot, resumeUserData } from './resume';
 import { isAnimeTitle, showIdentity } from './canonicalIds';
 import { keepsAnimeOnly, sourceFor } from './trackerSource';
 import { refreshSeriesIndex, seriesIndex, warmSeriesIndex } from './episodeIndex';
@@ -2124,9 +2124,9 @@ export function createJellyfinRouter(options: { loginRateLimit?: any } = {}): an
     const limit = Math.min(Math.max(1, qInt(req, 'Limit', 20)), 100);
     const watched = await watchedSnapshot(userUUID, config);
     const animeOnly = keepsAnimeOnly(config);
-    const rows = (await resumeSnapshot(userUUID, config))
+    const rows = continueWatchingRows((await resumeSnapshot(userUUID, config))
       .filter((row) => row.kind === 'movie' || !watched.dropped.has(row.metaId))
-      .filter((row) => !animeOnly || isAnimeTitle(row.metaId, row.kind === 'movie' ? 'movie' : 'series'));
+      .filter((row) => !animeOnly || isAnimeTitle(row.metaId, row.kind === 'movie' ? 'movie' : 'series')));
     if (!rows.length) {
       res.json(itemList([], 0, startIndex));
       return;
