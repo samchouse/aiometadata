@@ -1208,7 +1208,10 @@ async function fetchSimklListPage(accessToken: string, listId: string, page: num
 
 export interface SimklWatchedIds {
   movieImdbIds: Set<string>;
+  movieTmdbIds: Set<number>;
   showImdbIds: Set<string>;
+  showTmdbIds: Set<number>;
+  showProgress: Record<string, { seen: number; total: number }>;
   malIds: Set<number>;
   anilistIds: Set<number>;
 }
@@ -1231,7 +1234,9 @@ async function getSimklWatchedIds(config: any): Promise<SimklWatchedIds | null> 
 
     const watched = await cacheWrapGlobal(`simkl_watched_ids:${tokenHash}:${fingerprint}`, async () => {
       const movieImdbIds: string[] = [];
+      const movieTmdbIds: number[] = [];
       const showImdbIds: string[] = [];
+      const showTmdbIds: number[] = [];
       const malIds: number[] = [];
       const anilistIds: number[] = [];
 
@@ -1248,6 +1253,11 @@ async function getSimklWatchedIds(config: any): Promise<SimklWatchedIds | null> 
             (isMovie ? movieImdbIds : showImdbIds).push(imdb.startsWith('tt') ? imdb : `tt${imdb}`);
           }
 
+          if (ids.tmdb) {
+            (type === 'movies' || (type === 'anime' && (item.anime_type === 'movie' || item.anime_type === 'ona'))
+              ? movieTmdbIds : showTmdbIds).push(Number(ids.tmdb));
+          }
+
           if (type !== 'anime') continue;
           const malId = resolveMalIdFromIds(ids);
           if (malId) malIds.push(malId);
@@ -1257,12 +1267,15 @@ async function getSimklWatchedIds(config: any): Promise<SimklWatchedIds | null> 
       }
 
       logger.info(`[Watched IDs] ${movieImdbIds.length} movies, ${showImdbIds.length} shows, ${malIds.length} anime completed on Simkl`);
-      return { movieImdbIds, showImdbIds, malIds, anilistIds };
+      return { movieImdbIds, movieTmdbIds, showImdbIds, showTmdbIds, showProgress: {}, malIds, anilistIds };
     }, SIMKL_WATCHLIST_TTL, { resultClassifier: classifyResultAllowEmpty });
 
     return {
       movieImdbIds: new Set(watched.movieImdbIds),
+      movieTmdbIds: new Set(watched.movieTmdbIds || []),
       showImdbIds: new Set(watched.showImdbIds),
+      showTmdbIds: new Set(watched.showTmdbIds || []),
+      showProgress: watched.showProgress || {},
       malIds: new Set(watched.malIds),
       anilistIds: new Set(watched.anilistIds),
     };
