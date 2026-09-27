@@ -11,7 +11,7 @@ const logger = consola.withTag('mdblist-utils');
  * episode watched. Read from the watch mirror, which fetches only what changed since
  * its last sync, so a watch no longer re-reads the whole history.
  */
-export async function getMdblistWatchedIds(config: any): Promise<{ movieImdbIds: Set<string>, showImdbIds: Set<string>, tmdbIds: Set<number>, mdblistIds: Set<string> } | null> {
+export async function getMdblistWatchedIds(config: any): Promise<{ movieImdbIds: Set<string>, movieTmdbIds: Set<number>, showImdbIds: Set<string>, showTmdbIds: Set<number>, tmdbIds: Set<number>, mdblistIds: Set<string>, showProgress: Record<string, { seen: number, total: number }> } | null> {
   try {
     const mdblist = config.apiKeys?.mdblist;
     if (!mdblist) return null;
@@ -28,6 +28,8 @@ export async function getMdblistWatchedIds(config: any): Promise<{ movieImdbIds:
 
     const watchedData = await cacheWrapGlobal(`mdblist_watched_ids_v2:${sourceKeyFor('mdblist', mdblist)}:v${version}`, async () => {
       const movieImdbIds: string[] = [];
+      const movieTmdbIds: number[] = [];
+      const showTmdbIds: number[] = [];
       const tmdbIds: number[] = [];
       const mdblistIds: string[] = [];
       const episodesPerShow = new Map<string, number>();
@@ -37,7 +39,10 @@ export async function getMdblistWatchedIds(config: any): Promise<{ movieImdbIds:
         if (row.key.startsWith('movie:')) {
           const ids = row.data?.movie?.ids ?? {};
           if (ids.imdb) movieImdbIds.push(ids.imdb);
-          if (ids.tmdb) tmdbIds.push(ids.tmdb);
+          if (ids.tmdb) {
+            tmdbIds.push(ids.tmdb);
+            movieTmdbIds.push(ids.tmdb);
+          }
           if (ids.mdblist) mdblistIds.push(ids.mdblist);
         } else if (row.key.startsWith('ep:')) {
           const show = row.key.split(':')[1];
@@ -48,23 +53,37 @@ export async function getMdblistWatchedIds(config: any): Promise<{ movieImdbIds:
       }
 
       const showImdbIds: string[] = [];
+      const showProgress: Record<string, { seen: number, total: number }> = {};
       for (const [id, show] of shows) {
         const aired = Number(show?.total_aired_episodes) || 0;
-        if (!show?.ids?.imdb || aired <= 0 || (episodesPerShow.get(id) ?? 0) < aired) continue;
+        const seen = episodesPerShow.get(id) ?? 0;
+        if (!show?.ids?.imdb || aired <= 0) continue;
+        if (seen < aired && seen > 0) {
+          showProgress[show.ids.imdb] = { seen, total: aired };
+          if (show.ids.tmdb) showProgress[String(show.ids.tmdb)] = { seen, total: aired };
+          continue;
+        }
+        if (seen < aired) continue;
         showImdbIds.push(show.ids.imdb);
-        if (show.ids.tmdb) tmdbIds.push(show.ids.tmdb);
+        if (show.ids.tmdb) {
+          tmdbIds.push(show.ids.tmdb);
+          showTmdbIds.push(show.ids.tmdb);
+        }
         if (show.ids.mdblist) mdblistIds.push(show.ids.mdblist);
       }
 
       logger.info(`[Watched IDs] MDBList: ${movieImdbIds.length} movies, ${showImdbIds.length} shows fully watched.`);
-      return { movieImdbIds, showImdbIds, tmdbIds, mdblistIds };
+      return { movieImdbIds, movieTmdbIds, showImdbIds, showTmdbIds, tmdbIds, mdblistIds, showProgress };
     }, 86400);
 
     return {
       movieImdbIds: new Set(watchedData.movieImdbIds),
+      movieTmdbIds: new Set(watchedData.movieTmdbIds || []),
       showImdbIds: new Set(watchedData.showImdbIds),
+      showTmdbIds: new Set(watchedData.showTmdbIds || []),
       tmdbIds: new Set(watchedData.tmdbIds),
-      mdblistIds: new Set(watchedData.mdblistIds)
+      mdblistIds: new Set(watchedData.mdblistIds),
+      showProgress: watchedData.showProgress || {}
     };
   } catch (err: any) {
     logger.warn(`[Watched IDs] Error fetching MDBList watched IDs: ${err.message}`);
