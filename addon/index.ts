@@ -5767,6 +5767,7 @@ const metaRoute = async function (req, res) {
 
     const ids = extractIdsFromMeta(result.meta);
     const metaType = result.meta.type || type;
+    const { resolvePosterPattern, resolveThumbnailPattern } = require('./utils/parseProps');
     const btttrHistory = patternUsesBtttrHistory(
       resolvePosterPattern(config),
       config.customBackgroundUrlPattern,
