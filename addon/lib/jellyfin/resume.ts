@@ -394,6 +394,22 @@ export async function resumeSnapshot(userUUID: string, config: any): Promise<Res
   return rows.sort((a, b) => b.updatedAt - a.updatedAt);
 }
 
+/** Continue Watching shows one current episode per series, while keeping every movie. */
+export function continueWatchingRows(rows: ResumeRow[]): ResumeRow[] {
+  const latestBySeries = new Map<string, ResumeRow>();
+  const movies: ResumeRow[] = [];
+  for (const row of rows) {
+    if (row.kind === 'movie') {
+      movies.push(row);
+      continue;
+    }
+    const key = `${row.mediaType}:${row.metaId}`;
+    const current = latestBySeries.get(key);
+    if (!current || row.updatedAt > current.updatedAt) latestBySeries.set(key, row);
+  }
+  return [...movies, ...latestBySeries.values()].sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
 /** A tracker position newer than the table's row, and not this server's own echoed back, replaces it. */
 export function trackerPositionWins(row: ResumeRow, held: any): boolean {
   if (!held) return true;
