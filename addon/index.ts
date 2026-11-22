@@ -5500,10 +5500,22 @@ const catalogRoute = async function (req, res) {
 
 
 
-    if (catalogConfig?.randomizePerPage && Array.isArray(responseData?.metas) && responseData.metas.length > 1) {
+    const suppressMergedPopularityShuffle = cleanId.startsWith('merged.') &&
+      catalogConfig?.metadata?.mergeMode === 'popularity';
+    if (catalogConfig?.randomizePerPage && !suppressMergedPopularityShuffle && Array.isArray(responseData?.metas) && responseData.metas.length > 1) {
       responseData = req.params.forJellyfin === '1'
         ? { ...responseData, randomize: true }
         : { ...responseData, metas: shuffleMetas(responseData.metas) };
+    }
+
+    // Rank standalone results after filtering and ordering. For merged catalogs,
+    // preserve any source rank and use the merged position only when requested
+    // on the merged catalog itself.
+    if (catalogConfig?.row?.numbered && Array.isArray(responseData?.metas)) {
+      const offset = Math.max(0, (catalogPage - 1) * catalogPageSize);
+      responseData.metas = responseData.metas.map((meta, index) => meta && typeof meta === 'object'
+        ? { ...meta, _catalogRank: meta._catalogRank ?? offset + index + 1 }
+        : meta);
     }
 
     // Art URL pattern overrides for catalog items
@@ -5546,13 +5558,16 @@ const catalogRoute = async function (req, res) {
         const ids = extractIdsFromMeta(meta);
         const type = meta.type || actualType;
         if (art.posterApplies) {
-          if (proxyApiKey) {
+          // A custom pattern may include catalog rank. Resolve and proxy that
+          // concrete URL even when the general rating provider uses a proxy key.
+          const hasCustomPosterPattern = !!config.customPosterUrlPattern;
+          if (proxyApiKey && !hasCustomPosterPattern) {
             const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
             if (proxyId) {
               meta.poster = buildProxyArtUrl({ base: `${host}/poster-cache/proxy`, imageClass: 'poster', type: type, id: proxyId, fallback: meta.poster, ratingKey: proxyApiKey, lang: config.language });
             }
           } else {
-            const resolved = resolveCustomArtUrl(art.posterPattern, ids, type, config, { shape: posterShapeOf(meta) });
+            const resolved = resolveCustomArtUrl(art.posterPattern, ids, type, config, { shape: posterShapeOf(meta), rank: meta?._catalogRank });
             if (resolved) {
               if (config.usePosterProxy) {
                 const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
@@ -5568,7 +5583,7 @@ const catalogRoute = async function (req, res) {
           }
         }
         if (art.backgroundPattern) {
-          const resolved = resolveCustomArtUrl(art.backgroundPattern, ids, type, config, { shape: 'landscape' });
+          const resolved = resolveCustomArtUrl(art.backgroundPattern, ids, type, config, { shape: 'landscape', rank: meta?._catalogRank });
           if (resolved) {
             if (config.usePosterProxy) {
               const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
@@ -5583,7 +5598,7 @@ const catalogRoute = async function (req, res) {
           }
         }
         if (art.landscapePattern) {
-          const resolved = resolveCustomArtUrl(art.landscapePattern, ids, type, config, { shape: 'landscape' });
+          const resolved = resolveCustomArtUrl(art.landscapePattern, ids, type, config, { shape: 'landscape', rank: meta?._catalogRank });
           if (resolved) {
             if (config.usePosterProxy) {
               const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
@@ -5598,7 +5613,7 @@ const catalogRoute = async function (req, res) {
           }
         }
         if (art.logoPattern) {
-          const resolved = resolveCustomArtUrl(art.logoPattern, ids, type, config);
+          const resolved = resolveCustomArtUrl(art.logoPattern, ids, type, config, { rank: meta?._catalogRank });
           if (resolved) {
             if (config.usePosterProxy) {
               const proxyId = ids.imdbId || (ids.tmdbId ? `tmdb:${ids.tmdbId}` : (ids.tvdbId ? `tvdb:${ids.tvdbId}` : null));
@@ -5628,7 +5643,9 @@ const catalogRoute = async function (req, res) {
     }
 
     if (merged && Array.isArray(responseData?.metas)) {
-      for (const meta of responseData.metas) delete meta?._artSource;
+      for (const meta of responseData.metas) { delete meta?._artSource; delete meta?._catalogRank; }
+    } else if (Array.isArray(responseData?.metas)) {
+      for (const meta of responseData.metas) delete meta?._catalogRank;
     }
 
     if ((responseData as any)?.error) {

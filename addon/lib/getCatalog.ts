@@ -11,7 +11,7 @@ import { fetchSimklTrendingItems, fetchSimklRecipeItems, fetchSimklWatchlistItem
 import { fetchLetterboxdList, parseLetterboxdItems, getLetterboxdGenreIdByName } from "../utils/letterboxdUtils.js";
 import { getFlixPatrolMetas } from "../utils/flixpatrolUtils.js";
 import { fetchResume, parseResumeItems, fetchListPage, parseListItems, fetchPickItems, parsePickItems, publicMetaDBListType, publicMetaDBListId, WATCHLIST_CATALOG_ID } from "../utils/publicmetadbUtils.js";
-import { mapWithLimit } from "../utils/concurrency.js";
+import { mapWithLimit, mapWithConcurrency } from "../utils/concurrency.js";
 import { envInt } from '../utils/envNumber';
 import { MERGED_CATALOG_MODE, mergeModeOf } from './collectionBuilder/mergeModes';
 import { sourceFilterOptions, sourceForFilter } from './collectionBuilder/mergeSourceFilter';
@@ -37,7 +37,7 @@ import { fetchLumiereList, lumiereApiBase, lumiereListOf } from '../utils/lumier
 const { getSetting }: any = require('./settingsService');
 const { resolveSeriesRuntime }: any = require('./tmdbSeriesRuntime');
 import { resolveDynamicTmdbDiscoverParams } from './tmdbDiscoverDateTokens.js';
-import { roundRobinInterleaveTagged, mergedDedupKey, filterMetasByGenre, normalizeGenreKey } from '../utils/mergedCatalog.js';
+import { roundRobinInterleaveTagged, popularitySortOrRoundRobin, mergedDedupKey, filterMetasByGenre, normalizeGenreKey } from '../utils/mergedCatalog.js';
 const { getTvmazeScheduleCatalog } = require('./tvmazeScheduleCatalog');
 const { getServerWatchlistCatalog, isServerWatchlistCatalog } = require('./serverWatchlist');
 const movielens = require('./movielens');
@@ -3726,12 +3726,402 @@ async function getMergedCatalog(
       items = await applyCatalogFilters(items, { type, config, catalogConfig, cleanId: catalogId });
 
       const artSource = `${src.catalogId}:${src.catalogType}`;
-      return { items: items.map((meta: any) => (meta && typeof meta === 'object' ? { ...meta, _artSource: artSource } : meta)), rawLength: raw.length };
+      const rankOffset = Math.max(0, (srcPage - 1) * pageSize);
+      const sourceCatalogConfig = config.catalogs?.find((catalog: any) =>
+        catalog.id === src.catalogId && catalog.type === src.catalogType
+      );
+      return { items: items.map((meta: any, index: number) => (meta && typeof meta === 'object' ? {
+        ...meta,
+        _artSource: artSource,
+        ...(sourceCatalogConfig?.row?.numbered ? { _catalogRank: rankOffset + index + 1 } : {}),
+      } : meta)), rawLength: raw.length };
     } catch (err: any) {
       logger.warn(`[Merged] Source ${src.catalogId} failed: ${err.message}`);
       return { items: [], rawLength: 0 };
     }
   };
+
+  // Popularity mode serves a fixed ranked window so skip/page size never changes
+  // the ordering. Keep this snapshot separate from the legacy merge cursor.
+  if (mergeMode === 'popularity' && redis) {
+    const effectiveSourceConfigs = validSources.map((s: any) => {
+      const sourceConfig = viewerConfigFor(config, owner, s.catalogId);
+      return sourceConfig.catalogs?.find((c: any) => c.id === s.catalogId && c.type === s.catalogType);
+    });
+    const effectiveSourceGenres = await Promise.all(validSources.map(async (s: any) =>
+      sourceGenre || await hiddenCatalogGenre(config, userUUID, s.catalogId, s.catalogType) || ''
+    ));
+    const snapshotKey = `merged-ranked:v11:${createHash('sha256').update(stableStringify({
+      owner: owner || userUUID, catalogId, type, language, genre: sourceGenre,
+      sources: validSources.map((s: any) => ({ id: s.catalogId, type: s.catalogType })),
+      configs: effectiveSourceConfigs,
+      effectiveSourceGenres,
+      effectiveFilters: { includeAdult: config.includeAdult, ageRating: config.ageRating, watched: config.watched, account: owner || userUUID },
+      includeVideos,
+    })).digest('hex')}`;
+    let ranked: any[] = [];
+    let sourceTailPages = validSources.map(() => -1);
+    const saved = await redis!.get(snapshotKey);
+    if (saved) {
+      try {
+        const snapshot = JSON.parse(saved);
+        if (Array.isArray(snapshot)) ranked = snapshot;
+        else { ranked = snapshot.ranked || []; sourceTailPages = snapshot.tailPages || sourceTailPages; }
+      } catch { ranked = []; }
+    }
+    if (!Array.isArray(ranked) || ranked.length === 0) {
+      const rows: Array<{ meta: any; srcIdx: number; position: number }> = [];
+      sourceTailPages = validSources.map(() => -1);
+      // Collect raw Discover summaries for TMDB, retaining ranking signals and
+      // delaying full metadata resolution until candidates are emitted.
+      await mapWithConcurrency(validSources, 4, async (src: any, srcIdx: number) => {
+        const isTmdb = src.catalogId.startsWith('tmdb.') || src.catalogId.startsWith('streaming.');
+        let ceiling = 40;
+        let emptyRun = 0;
+        let lastMainPage = 0;
+        let genres: any[] = [];
+        // viewerConfigFor can return the shared config object for the normal
+        // account. Candidate scans run concurrently, so keep the per-source
+        // current catalog pointer local to this worker.
+        const sourceConfig = { ...viewerConfigFor(config, owner, src.catalogId) };
+        sourceConfig._currentCatalogConfig = sourceConfig.catalogs?.find((c: any) => c.id === src.catalogId && c.type === src.catalogType);
+        const sourceGenreFilter = sourceGenre || await hiddenCatalogGenre(config, userUUID, src.catalogId, src.catalogType) || '';
+        if (isTmdb) genres = await getGenreList('tmdb', language, src.catalogType === 'movie' ? 'movie' : 'series', sourceConfig);
+        const fetchRawTmdb = (params: any, retry = false) => {
+          const key = `merged-tmdb-candidates:v8:${createHash('sha256').update(stableStringify({ source: src.catalogId, type: src.catalogType, params, config: sourceConfig, retry: retry ? Date.now() : 0 })).digest('hex')}`;
+          return cacheWrapGlobal(key, () => src.catalogType === 'movie'
+            ? moviedb.discoverMovie(params, sourceConfig)
+            : moviedb.discoverTv(params, sourceConfig), Math.min(6 * 60 * 60, catalogTTL));
+        };
+        const candidateParams = async (candidatePage: number) => {
+          if (src.catalogId.startsWith('tmdb.discover.')) {
+            const discoverMetadata = sourceConfig._currentCatalogConfig?.metadata?.discover || {};
+            const stored = discoverMetadata.params || sourceConfig._currentCatalogConfig?.metadata?.discoverParams || {};
+            const raw = stored && typeof stored === 'object' && !Array.isArray(stored) ? { ...stored } : {};
+            if (sourceGenreFilter && sourceGenreFilter.toLowerCase() !== 'none') {
+              const genreList = await getGenreList('tmdb', language, src.catalogType === 'movie' ? 'movie' : 'series', sourceConfig);
+              const genreId = genreList.find((g: any) => String(g.name).toLowerCase() === sourceGenreFilter.toLowerCase())?.id;
+              if (genreId) raw.with_genres = [...new Set(`${raw.with_genres || ''}`.split(',').filter(Boolean).concat(String(genreId)))].join(',');
+            }
+            const resolved = resolveDynamicTmdbDiscoverParams(raw, { timezone: config.timezone });
+            const sanitized = sanitizeTmdbDiscoverParams(resolved, language, candidatePage, config.includeAdult || false, src.catalogType as 'movie' | 'series');
+            sanitized.sort_by = 'popularity.desc';
+            return sanitized;
+          }
+          const params = await buildParameters(src.catalogType, language, candidatePage, src.catalogId, sourceGenreFilter, genres, sourceConfig);
+          params.page = candidatePage;
+          params.sort_by = 'popularity.desc';
+          return params;
+        };
+        for (let p = 1; p <= ceiling && emptyRun < 3; p++) {
+          lastMainPage = p;
+          let items: any[] = [];
+          let totalPages: number | undefined;
+          if (isTmdb) {
+            const params = await candidateParams(p);
+            const response = await fetchRawTmdb(params);
+            items = response?.results || [];
+            totalPages = response?.total_pages;
+            if (p === 1 && Number.isFinite(totalPages)) ceiling = Math.min(40, 500, Math.max(1, totalPages!));
+          } else {
+            const response = await fetchSourcePage(src, p);
+            items = response.items;
+          }
+          if (items.length === 0) {
+            emptyRun++;
+            if (emptyRun === 1) {
+              if (isTmdb) {
+                const retryParams = await candidateParams(p);
+                const retry = await fetchRawTmdb(retryParams, true);
+                items = retry?.results || [];
+              } else items = (await fetchSourcePage(src, p)).items;
+            }
+            if (!items.length) continue;
+          }
+          emptyRun = 0;
+          items.forEach((item: any, i: number) => {
+            const meta = isTmdb ? {
+              id: `${src.catalogType === 'movie' ? 'tmdb' : 'tmdb'}:${item.id}`,
+              type: src.catalogType === 'movie' ? 'movie' : 'series',
+              name: item.title || item.name,
+              poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : undefined,
+              background: item.backdrop_path ? `https://image.tmdb.org/t/p/w500${item.backdrop_path}` : undefined,
+              _candidate: { popularity: item.popularity, vote_count: item.vote_count, first_air_date: item.first_air_date, release_date: item.release_date, vote_average: item.vote_average, origin_country: item.origin_country, production_countries: item.production_countries, original_language: item.original_language },
+              _source: srcIdx, _sourcePage: p, _sourceItemPosition: i,
+            } : { ...item, _source: srcIdx, _sourcePage: p, _sourceItemPosition: i };
+            const sourcePageSize = isTmdb ? TMDB_DISCOVER_PAGE_SIZE : pageSize;
+            rows.push({ meta, srcIdx, position: (p - 1) * sourcePageSize + i });
+          });
+        }
+        if (ceiling === 40 && lastMainPage === 40 && emptyRun < 3) sourceTailPages[srcIdx] = 41;
+        // TV freshness lanes keep the source's filters and replace only date/sort/page.
+        if (isTmdb && src.catalogType !== 'movie') {
+          const now = new Date();
+          const fromRecent = new Date(now); fromRecent.setMonth(fromRecent.getMonth() - 18);
+          // Give recently aired reality/streaming seasons more room to enter the
+          // pool when the source's saved ordering places them beyond page 40.
+          const fromAir = new Date(now); fromAir.setDate(fromAir.getDate() - 90);
+          for (const lane of [
+            { start: fromRecent, end: now, field: 'first_air_date', bonus: 'premiere' },
+            { start: fromAir, end: now, field: 'air_date', bonus: 'airing' },
+          ]) {
+            for (let p = 1; p <= 5; p++) {
+              const params = await candidateParams(p);
+              delete params.first_air_date_year;
+              params[`${lane.field}.gte`] = lane.start.toISOString().slice(0, 10);
+              params[`${lane.field}.lte`] = lane.end.toISOString().slice(0, 10);
+              params.sort_by = 'popularity.desc';
+              const response = await fetchRawTmdb(params);
+              for (const item of response?.results || []) {
+                rows.push({ meta: { id: `tmdb:${item.id}`, type: 'series', name: item.name, poster: item.poster_path ? `https://image.tmdb.org/t/p/w500${item.poster_path}` : undefined,
+                  _candidate: { popularity: item.popularity, vote_count: item.vote_count, first_air_date: item.first_air_date, release_date: item.first_air_date, vote_average: item.vote_average, origin_country: item.origin_country, original_language: item.original_language, [lane.bonus]: true },
+                  _source: srcIdx, _sourcePage: p, _sourceItemPosition: 800 + p * 20 }, srcIdx, position: 800 + p * 20 });
+              }
+            }
+          }
+        }
+      });
+      const uniqueRows: Array<{ meta: any; srcIdx: number; position: number }> = [];
+      const seenCandidateIds = new Set<string>();
+      const candidateIndexes = new Map<string, number>();
+      for (const row of rows) {
+        const key = mergedDedupKey(row.meta);
+        const sourceScopedKey = key ? `${row.srcIdx}:${key}` : null;
+        if (sourceScopedKey && seenCandidateIds.has(sourceScopedKey)) {
+          const existing = uniqueRows[candidateIndexes.get(sourceScopedKey)!];
+          const incoming = row.meta?._candidate;
+          if (incoming?.airing || incoming?.premiere) existing.meta._candidate = {
+            ...(existing.meta._candidate || {}), airing: Boolean(existing.meta._candidate?.airing || incoming.airing),
+            premiere: Boolean(existing.meta._candidate?.premiere || incoming.premiere),
+          };
+          continue;
+        }
+        if (sourceScopedKey) seenCandidateIds.add(sourceScopedKey);
+        if (sourceScopedKey) candidateIndexes.set(sourceScopedKey, uniqueRows.length);
+        uniqueRows.push(row);
+      }
+      const bySource = validSources.map((_, idx) => uniqueRows.filter(r => r.srcIdx === idx));
+      const percentile = new Map<any, number>();
+      const audiencePercentile = new Map<any, number>();
+      bySource.forEach((sourceRows) => {
+        const sourceOrder = sourceRows.slice().sort((a, b) => a.position - b.position);
+        const assignPercentile = (readValue: (row: any) => unknown, target: Map<any, number>) => {
+          const scored = sourceRows.filter(row => {
+            const value = readValue(row);
+            return typeof value === 'number' && Number.isFinite(value);
+          }).slice().sort((a, b) => Number(readValue(a)) - Number(readValue(b)));
+          let i = 0;
+          while (i < scored.length) {
+            let j = i + 1;
+            while (j < scored.length && readValue(scored[j]) === readValue(scored[i])) j++;
+            const rank = scored.length === 1 ? 0.5 : ((i + j - 1) / 2) / (scored.length - 1);
+            for (let k = i; k < j; k++) target.set(scored[k], rank);
+            i = j;
+          }
+          for (let position = 0; position < sourceOrder.length; position++) {
+            const row = sourceOrder[position];
+            if (!target.has(row)) target.set(row, sourceOrder.length > 1 ? 1 - position / (sourceOrder.length - 1) : 0.5);
+          }
+        };
+        assignPercentile(row => row.meta?._candidate?.popularity ?? row.meta?.popularity, percentile);
+        assignPercentile(row => row.meta?._candidate?.vote_count ?? row.meta?.vote_count, audiencePercentile);
+        if (!sourceRows.some(row => typeof (row.meta?._candidate?.vote_count ?? row.meta?.vote_count) === 'number' && Number.isFinite(row.meta?._candidate?.vote_count ?? row.meta?.vote_count))) {
+          for (const row of sourceRows) audiencePercentile.set(row, percentile.get(row) ?? 0.5);
+        }
+      });
+      const northAmerica = new Set(['US', 'CA', 'MX', 'GT', 'BZ', 'SV', 'HN', 'NI', 'CR', 'PA', 'CU', 'JM', 'HT', 'DO', 'PR']);
+      const europe = new Set(['GB', 'IE', 'FR', 'DE', 'ES', 'PT', 'IT', 'NL', 'BE', 'LU', 'CH', 'AT', 'DK', 'SE', 'NO', 'FI', 'IS', 'PL', 'CZ', 'SK', 'HU', 'RO', 'BG', 'GR', 'HR', 'SI', 'RS', 'BA', 'ME', 'MK', 'AL', 'EE', 'LV', 'LT', 'UA', 'MD', 'BY', 'RU', 'CY', 'MT', 'LI', 'MC', 'AD', 'SM', 'VA']);
+      const europeanLanguages = new Set(['fr', 'de', 'es', 'pt', 'it', 'nl', 'da', 'sv', 'no', 'fi', 'is', 'pl', 'cs', 'sk', 'hu', 'ro', 'bg', 'el', 'hr', 'sl', 'sr', 'uk', 'ru', 'et', 'lv', 'lt']);
+      const scoreCandidate = (row: any) => {
+        const p = percentile.get(row) ?? 0.5;
+        const audience = audiencePercentile.get(row) ?? p;
+        // Audience reach corroborates popularity without comparing raw vote
+        // totals across providers or letting a single huge list dominate.
+        const popularitySignal = 0.8 * p + 0.2 * audience;
+        const signal = row.meta?._candidate || row.meta || {};
+        const airDate = signal.first_air_date || signal.release_date;
+        const days = airDate ? Math.max(0, (Date.now() - new Date(airDate).getTime()) / 86400000) : Infinity;
+        // Movies stay fresh across a longer release/streaming window; series
+        // premieres retain the original 180-day half-life.
+        const premiereHalfLife = row.meta?.type === 'movie' ? 365 : 180;
+        const premiere = Number.isFinite(days) ? Math.pow(2, -days / premiereHalfLife) : 0;
+        const freshness = Math.max(premiere, signal.airing ? 0.5 : 0);
+        const confidence = p >= 0.35 || Number(signal.vote_count) >= 25 ? 1 : 0.5;
+        // Recent episodes soften the age penalty but do not reset it. A slower
+        // decay and higher floor for active shows preserves current relevance
+        // while still discounting decades-old series that remain well known.
+        const activityFactor = Number.isFinite(days)
+          ? signal.airing
+            ? Math.max(0.25, Math.pow(2, -days / (365 * 12)))
+            : Math.max(0.08, Math.pow(2, -days / (365 * 4)))
+          : 0.08;
+        // Prefer North American productions, then European ones. Discover
+        // responses often omit production countries, so use original language
+        // as a fallback; unknown and other regions receive the low base weight.
+        const origin = signal.origin_country || signal.production_countries || [];
+        const countries = (Array.isArray(origin) ? origin : [origin]).map((country: any) =>
+          String(country?.iso_3166_1 || country?.iso_3166_2 || country || '').slice(0, 2).toUpperCase()
+        ).filter(Boolean);
+        const regionWeight = countries.some((country: string) => northAmerica.has(country)) ? 1
+          : countries.includes('GB') ? 0.9
+          : countries.some((country: string) => europe.has(country)) ? 0.65
+          : countries.length ? 0.08
+          : signal.original_language === 'en' ? 1
+          : europeanLanguages.has(signal.original_language) ? 0.65
+          : 0.08;
+        return {
+          ...row,
+          score: (0.7 * popularitySignal * activityFactor + 0.3 * freshness * confidence) * regionWeight,
+          p: popularitySignal,
+        };
+      };
+      const unionCandidates: any[] = [];
+      const unionIndex = new Map<string, number>();
+      const scoredRows = uniqueRows.slice().sort((a, b) => a.srcIdx - b.srcIdx || a.position - b.position).map(scoreCandidate);
+      for (const candidate of scoredRows) {
+        const key = mergedDedupKey(candidate.meta);
+        if (!key || !unionIndex.has(key)) {
+          if (key) unionIndex.set(key, unionCandidates.length);
+          unionCandidates.push(candidate);
+          continue;
+        }
+        // A duplicate may have stronger popularity/audience evidence in another
+        // eligible source. Keep first-source metadata/art, but retain its best
+        // source-normalized ranking score rather than discarding that evidence.
+        const existing = unionCandidates[unionIndex.get(key)!];
+        if (candidate.score > existing.score) {
+          existing.score = candidate.score;
+          existing.p = candidate.p;
+        }
+      }
+      ranked = unionCandidates.sort((a, b) => b.score - a.score || b.p - a.p || a.srcIdx - b.srcIdx || a.position - b.position || String(mergedDedupKey(a.meta)).localeCompare(String(mergedDedupKey(b.meta))))
+        .map(row => row.meta);
+      await redis!.set(snapshotKey, JSON.stringify({ ranked, tailPages: sourceTailPages }), 'EX', Math.min(6 * 60 * 60, catalogTTL));
+    }
+    const rankedCursorKey = `${snapshotKey}:cursor`;
+    const outputPageKey = `${snapshotKey}:page:${stremioSkip}`;
+    const cachedOutput = stremioSkip > 0 && saved ? await redis!.get(outputPageKey) : null;
+    if (cachedOutput) {
+      try { return JSON.parse(cachedOutput); } catch { /* Rebuild the page from its cursor. */ }
+    }
+    type RankedCursor = {
+      served: number; candidateIndex: number; emittedIds: string[];
+      tailPage: number[]; tailSeenIds: string[]; tailBatch?: Array<{ item: any; srcIdx: number }>;
+      tailBatchConsumed: number[]; tailRawLengths: number[];
+    };
+    let rankedCursor: RankedCursor = {
+      served: 0, candidateIndex: 0, emittedIds: [],
+      tailPage: sourceTailPages.slice(), tailSeenIds: [], tailBatchConsumed: [], tailRawLengths: [],
+    };
+    if (stremioSkip > 0 && saved) {
+      const savedCursor = await redis!.get(rankedCursorKey);
+      if (savedCursor) {
+        try {
+          const parsed = JSON.parse(savedCursor);
+          if (parsed?.served <= stremioSkip && Array.isArray(parsed.tailPage)) rankedCursor = parsed;
+        } catch { /* A missing or invalid cursor safely restarts from the snapshot. */ }
+      }
+    } else await redis!.del(rankedCursorKey);
+    const mergedRank = catalogConfig?.row?.numbered === true;
+    const hydrated: any[] = [];
+    let skippedThisRequest = 0;
+    const replaySkip = Math.max(0, stremioSkip - rankedCursor.served);
+    const emittedIds = new Set<string>(rankedCursor.emittedIds || []);
+    while (rankedCursor.candidateIndex < ranked.length && (skippedThisRequest < replaySkip || hydrated.length < pageSize)) {
+      const candidateIndex = rankedCursor.candidateIndex++;
+      let meta = ranked[candidateIndex];
+      const candidateSourceIdx = meta?._source;
+      if (meta?._candidate) {
+        const source = validSources[candidateSourceIdx];
+        const sourceConfig = viewerConfigFor(config, owner, source.catalogId);
+        const resolved = await cacheWrapMetaSmart(userUUID, meta.id, () => getMeta(source.catalogType, language, meta.id, sourceConfig, userUUID, includeVideos), undefined,
+          { enableErrorCaching: true, maxRetries: 2, config: sourceConfig }, source.catalogType as any, includeVideos);
+        meta = resolved?.meta;
+        if (!meta) continue;
+      }
+      delete meta._candidate;
+      delete meta._source;
+      delete meta._sourcePage;
+      delete meta._sourceItemPosition;
+      meta._artSource = `${validSources[candidateSourceIdx]?.catalogId || validSources[0].catalogId}:${validSources[candidateSourceIdx]?.catalogType || validSources[0].catalogType}`;
+      let filtered = [meta];
+      if (hasGenreFilter) filtered = filterMetasByGenre(filtered, sourceGenre);
+      filtered = await applyCatalogFilters(filtered, { type, config, catalogConfig, cleanId: catalogId });
+      const key = mergedDedupKey(filtered[0]);
+      if (filtered.length && (!key || !emittedIds.has(key))) {
+        if (key) emittedIds.add(key);
+        if (skippedThisRequest < replaySkip) {
+          skippedThisRequest++;
+          rankedCursor.served++;
+          continue;
+        }
+        hydrated.push(mergedRank ? { ...filtered[0], _catalogRank: rankedCursor.served + hydrated.length + 1 } : filtered[0]);
+      }
+    }
+    const tailSeenIds = new Set<string>([
+      ...emittedIds,
+      ...ranked.map((m: any) => mergedDedupKey(m)).filter(Boolean),
+      ...(rankedCursor.tailSeenIds || []),
+    ]);
+    while (rankedCursor.candidateIndex >= ranked.length && (skippedThisRequest < replaySkip || hydrated.length < pageSize)) {
+      if (!rankedCursor.tailBatch || rankedCursor.tailBatchConsumed.reduce((a, b) => a + b, 0) >= rankedCursor.tailBatch.length) {
+        const live = validSources.map((src: any, i: number) => ({ src, i })).filter(x => rankedCursor.tailPage[x.i] > 0);
+        if (!live.length) break;
+        const tailResults = await Promise.all(validSources.map(async (src: any, i: number) =>
+          rankedCursor.tailPage[i] > 0 ? fetchSourcePage(src, rankedCursor.tailPage[i]) : { items: [], rawLength: 0 }
+        ));
+        const tagged = popularitySortOrRoundRobin(tailResults.map(r => r.items));
+        rankedCursor.tailRawLengths = tailResults.map(r => r.rawLength);
+        rankedCursor.tailBatch = tagged;
+        rankedCursor.tailBatchConsumed = new Array(validSources.length).fill(0);
+        if (!tagged.length) {
+          for (let i = 0; i < validSources.length; i++) {
+            if (!tailResults[i].rawLength) rankedCursor.tailPage[i] = -1;
+            else rankedCursor.tailPage[i]++;
+          }
+          rankedCursor.tailBatch = undefined;
+          rankedCursor.tailBatchConsumed = [];
+          if (rankedCursor.tailPage.every(p => p <= 0)) break;
+          continue;
+        }
+      }
+      let progressed = false;
+      while (rankedCursor.tailBatchConsumed.reduce((a, b) => a + b, 0) < rankedCursor.tailBatch.length && hydrated.length < pageSize) {
+        const tagged = rankedCursor.tailBatch[rankedCursor.tailBatchConsumed.reduce((a, b) => a + b, 0)];
+        const meta = tagged.item;
+        rankedCursor.tailBatchConsumed[tagged.srcIdx]++;
+        progressed = true;
+        const key = mergedDedupKey(meta);
+        if (key && tailSeenIds.has(key)) continue;
+        let filtered = [meta];
+        if (hasGenreFilter) filtered = filterMetasByGenre(filtered, sourceGenre);
+        filtered = await applyCatalogFilters(filtered, { type, config, catalogConfig, cleanId: catalogId });
+        if (!filtered.length) continue;
+        if (key) tailSeenIds.add(key);
+        if (skippedThisRequest < replaySkip) {
+          skippedThisRequest++;
+          rankedCursor.served++;
+          continue;
+        }
+        hydrated.push(mergedRank ? { ...filtered[0], _catalogRank: rankedCursor.served + hydrated.length + 1 } : filtered[0]);
+      }
+      if (rankedCursor.tailBatchConsumed.reduce((a, b) => a + b, 0) >= rankedCursor.tailBatch.length) {
+        for (let i = 0; i < validSources.length; i++) {
+          if (!rankedCursor.tailRawLengths[i]) rankedCursor.tailPage[i] = -1;
+          else if (rankedCursor.tailPage[i] > 0) rankedCursor.tailPage[i]++;
+        }
+        rankedCursor.tailBatch = undefined;
+        rankedCursor.tailBatchConsumed = [];
+      }
+      if (!progressed) break;
+    }
+    rankedCursor.served += hydrated.length;
+    rankedCursor.emittedIds = [...emittedIds];
+    rankedCursor.tailSeenIds = [...tailSeenIds];
+    await redis!.set(rankedCursorKey, JSON.stringify(rankedCursor), 'EX', Math.min(6 * 60 * 60, catalogTTL));
+    await redis!.set(outputPageKey, JSON.stringify(hydrated), 'EX', Math.min(6 * 60 * 60, catalogTTL));
+    return hydrated;
+  }
 
   const collectDeduped = (metas: any[], collected: any[]): { added: number; consumed: number } => {
     let added = 0;
@@ -3858,7 +4248,9 @@ async function getMergedCatalog(
         })
       );
 
-      const tagged = roundRobinInterleaveTagged(results.map(r => r.items));
+      const tagged = mergeMode === 'popularity'
+        ? popularitySortOrRoundRobin(results.map(r => r.items))
+        : roundRobinInterleaveTagged(results.map(r => r.items));
       const { added, consumedPerSource } = collectDedupedTagged(
         tagged.map(t => ({ meta: t.item, srcIdx: t.srcIdx })),
         collected

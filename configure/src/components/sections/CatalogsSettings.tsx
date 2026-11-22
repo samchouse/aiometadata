@@ -3871,7 +3871,6 @@ const SortableCatalogItem = React.memo(({ catalog, onEditDiscover, onCustomize, 
               <p>{catalog.randomizePerPage && catalog.enabled ? 'Randomized per page' : 'Original order'}</p>
             </TooltipContent>
           </Tooltip>
-
           <Tooltip>
             <TooltipTrigger asChild>
               <Button variant="ghost" size="icon" onClick={handleMoveToTop} aria-label="Move to Top" className="h-8 w-8 active:scale-90 transition-transform">
@@ -5399,7 +5398,7 @@ function CatalogsSettingsContent({
   const [mergeName, setMergeName] = useState('');
   const [mergeShowInHome, setMergeShowInHome] = useState(true);
   const [mergeDisplayType, setMergeDisplayType] = useState('');
-  const [mergeMode, setMergeMode] = useState<MergeMode>(MERGED_CATALOG_MODE);
+  const [mergeMode, setMergeMode] = useState<MergeMode>('popularity');
   const [mergeBySource, setMergeBySource] = useState(false);
 
   const openMergeDialog = () => {
@@ -5416,7 +5415,7 @@ function CatalogsSettingsContent({
     setMergeName(baseName);
     setMergeShowInHome(true);
     setMergeDisplayType('');
-    setMergeMode('interleaved');
+    setMergeMode('popularity');
     setMergeBySource(false);
     setShowMergeDialog(true);
   };

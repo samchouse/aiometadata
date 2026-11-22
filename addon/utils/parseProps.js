@@ -99,6 +99,14 @@ function resolveCustomArtUrl(pattern, ids, type, config, extra) {
 function resolvePattern(pattern, ids, type, config, extra) {
   if (!pattern || typeof pattern !== 'string' || !pattern.trim()) return null;
 
+  // Conditional blocks ending in ?rank emit their arbitrary prefix and rank
+  // only when a rank is available. For example, {?rank=?rank} -> ?rank=3.
+  pattern = pattern.replace(/\{([^{}]*\?rank)\}/g, (_match, body) =>
+    extra?.rank != null && Number.isFinite(Number(extra.rank))
+      ? `${body.slice(0, -'?rank'.length)}${extra.rank}`
+      : ''
+  );
+
   const lang = config?.language || 'en-US';
   const placeholders = {
     '{id}': ids?.id || '',
@@ -239,9 +247,11 @@ function getDefaultThumbnailPattern(provider) {
  */
 function resolvePosterPattern(config) {
   const provider = config?.posterRatingProvider;
+  // An explicitly configured pattern always wins, including when no rating
+  // provider is selected. Provider defaults are only a fallback.
+  if (config?.customPosterUrlPattern) return config.customPosterUrlPattern;
   if (provider === 'none') return null;
-  return config?.customPosterUrlPattern
-    || (provider && provider !== 'custom' ? getDefaultPosterPattern(provider) : null);
+  return provider && provider !== 'custom' ? getDefaultPosterPattern(provider) : null;
 }
 
 function hasShapePlaceholder(pattern) {

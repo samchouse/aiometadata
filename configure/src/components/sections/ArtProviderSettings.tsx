@@ -410,6 +410,7 @@ export function ArtProviderSettings() {
                 </p>
                 <p>
                   <strong>Shape:</strong> <code>{'{shape}'}</code> becomes <code>poster</code>, <code>landscape</code> or <code>square</code>.
+                  <br /><strong>Rank:</strong> enable <code>Numbered</code> in a catalog's Row options, then use <code>{'{?rank=?rank}'}</code> to emit text only when an item rank is available. This produces <code>?rank=1</code> for the first item and omits the whole block when rank is unavailable.
                   A poster pattern with it also fills the landscape poster, unless a Landscape URL Pattern is set.
                 </p>
                 <p>RPDB/TOP patterns automatically fall back to alternative IDs when the primary one is unavailable.</p>
