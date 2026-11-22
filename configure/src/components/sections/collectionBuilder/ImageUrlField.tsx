@@ -6,6 +6,7 @@ import { Image as ImageIcon, ImageOff } from 'lucide-react';
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { PREVIEW_BOX, type PreviewAspect } from './shared';
+import { useCollectionImagePreview } from '@/lib/collectionBuilder/imageProxy';
 
 /** URL input with a live thumbnail, so art can be judged before exporting. */
 export function ImageUrlField({
@@ -26,6 +27,7 @@ export function ImageUrlField({
   const [debounced, setDebounced] = useState(value);
   const [status, setStatus] = useState<'idle' | 'loading' | 'ok' | 'error'>('idle');
   const fieldId = useId();
+  const previewUrl = useCollectionImagePreview(debounced);
 
   // Wait for a pause in typing so a half-typed URL is not fetched on every key.
   useEffect(() => {
@@ -34,7 +36,7 @@ export function ImageUrlField({
   }, [value]);
 
   useEffect(() => {
-    setStatus(debounced ? 'loading' : 'idle');
+    setStatus(!debounced ? 'idle' : /^https?:\/\//i.test(debounced) ? 'loading' : 'error');
   }, [debounced]);
 
   return (
@@ -49,10 +51,10 @@ export function ImageUrlField({
             status === 'error' ? 'border-amber-600/60 bg-amber-950/20' : 'border-dashed bg-muted/40'
           }`}
         >
-          {debounced && status !== 'error' && (
+          {previewUrl && status !== 'error' && (
             <img
               key={debounced}
-              src={debounced}
+              src={previewUrl}
               alt=""
               loading="lazy"
               referrerPolicy="no-referrer"
@@ -86,7 +88,7 @@ export function ImageUrlField({
           />
           {status === 'error' && (
             <p className="text-xs text-amber-500">
-              The image did not load. Check the link is public and points straight at the file.
+              The server could not load this image. Check that it can reach the host and that the URL points straight at an image.
             </p>
           )}
         </div>

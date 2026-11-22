@@ -15,6 +15,7 @@ import type {
 } from '@shared/types';
 import { folderSources } from '@shared/types';
 import { TERMS, type Target } from '@/lib/collectionBuilder/terms';
+import { useCollectionImagePreview } from '@/lib/collectionBuilder/imageProxy';
 
 const TILE_ASPECT: Record<TileShape, string> = {
   POSTER: '2 / 3',
@@ -151,15 +152,16 @@ function TileArt({
   const cover = (folder.coverImageUrl || '').trim();
   const gif = (folder.focusGifUrl || '').trim();
   const src = focused && gif && folder.focusGifEnabled !== false ? gif : cover;
+  const previewSrc = useCollectionImagePreview(src);
   const failed = Boolean(src) && brokenSrc === src;
   const title = folder.title.trim();
   const emoji = allowEmoji ? (folder.coverEmoji || '').trim() : '';
 
-  if (src && !failed) {
+  if (previewSrc && !failed) {
     return (
       <img
         key={src}
-        src={src}
+        src={previewSrc}
         alt=""
         loading="lazy"
         referrerPolicy="no-referrer"
@@ -269,10 +271,13 @@ function NuvioCollectionStage({
   const base = (entry.backdropImageUrl || '').trim();
   const hero = (focused?.heroBackdropUrl || '').trim();
   const logo = (focused?.titleLogoUrl || '').trim();
+  const basePreview = useCollectionImagePreview(base);
+  const logoPreview = useCollectionImagePreview(logo);
 
   // The hero layer stays mounted with the last one seen, so leaving a tile fades
   // back out instead of unmounting mid-transition.
   const [lastHero, setLastHero] = useState('');
+  const lastHeroPreview = useCollectionImagePreview(lastHero);
   useEffect(() => {
     if (hero) setLastHero(hero);
   }, [hero]);
@@ -299,19 +304,19 @@ function NuvioCollectionStage({
 
   return (
     <div className="relative aspect-video min-h-[19rem] w-full overflow-hidden rounded-lg border bg-neutral-950">
-      {base && (
+      {basePreview && (
         <img
           key={base}
-          src={base}
+          src={basePreview}
           alt=""
           loading="lazy"
           referrerPolicy="no-referrer"
           className="absolute inset-0 h-full w-full object-cover opacity-60"
         />
       )}
-      {lastHero && (
+      {lastHeroPreview && (
         <img
-          src={lastHero}
+          src={lastHeroPreview}
           alt=""
           loading="lazy"
           referrerPolicy="no-referrer"
@@ -330,10 +335,10 @@ function NuvioCollectionStage({
         )}
 
         <div className="flex items-center gap-3">
-          {logo && (
+          {logoPreview && (
             <img
               key={logo}
-              src={logo}
+              src={logoPreview}
               alt=""
               loading="lazy"
               referrerPolicy="no-referrer"
