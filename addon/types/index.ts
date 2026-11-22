@@ -6,6 +6,8 @@ import type { LiveTvPick } from '../lib/jellyfin/livetv/pick';
 
 export interface UserConfig {
   language?: string;
+  /** Blocks public Stremio routes for this configuration; Jellyfin in-process reads are unaffected. */
+  stremioAccessEnabled?: boolean;
   /** Install URL of a stream addon the Jellyfin server delegates playback to. */
   jellyfinStreamUrl?: string;
   jellyfinLatestRows?: boolean;

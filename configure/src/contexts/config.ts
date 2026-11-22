@@ -243,6 +243,8 @@ export interface ManagerAccount {
 }
 
 export interface AppConfig {
+  /** Whether the public Stremio install, catalog and metadata routes are enabled. */
+  stremioAccessEnabled?: boolean;
   language: string;
   addonName: string;
   includeAdult: boolean;

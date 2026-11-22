@@ -27,7 +27,8 @@ export function InstallLinks({ userUUID, installUrl }: { userUUID: string; insta
   const { openInstall, isDirty } = useSave();
   const jellyfin = useJellyfinServer();
   const stremioOn = scrobblesStremio(config);
-  const status = useStremioLinkStatus(stremioOn);
+  const stremioAccessEnabled = config.stremioAccessEnabled !== false;
+  const status = useStremioLinkStatus(stremioOn && stremioAccessEnabled);
   const mainName = config.jellyfinUserName || config.addonName || userUUID.slice(0, 8);
   const people = [{ id: '', name: mainName }, ...(config.jellyfinUsers ?? []).map((u) => ({ id: u.id, name: u.name || 'Unnamed person' }))];
   const address = jellyfinServerAddress(jellyfin.baseUrl, userUUID, installUrl);
@@ -54,7 +55,7 @@ export function InstallLinks({ userUUID, installUrl }: { userUUID: string; insta
         </div>
       ) : null}
 
-      {stremioOn ? (
+      {stremioOn && stremioAccessEnabled ? (
         <div className="space-y-2">
           <div>
             <Label className="text-sm font-medium">Stremio install links</Label>

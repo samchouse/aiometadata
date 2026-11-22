@@ -707,6 +707,26 @@ addon.use((req, _res, next) => runWithRequestAuth(isAuthenticatedRequest(req), n
 addon.use(requireSigninForAppPages);
 addon.use(requireSigninForApi);
 
+// This is an external HTTP gate. Jellyfin invokes catalog/meta handlers
+// directly in-process, so disabling public Stremio access leaves Jellyfin reads intact.
+addon.use(async (req, res, next) => {
+  const match = /^\/stremio\/([^/]+)/.exec(req.path || '');
+  if (!match) return next();
+  // Stremio opens this page to configure the addon itself; it is not a
+  // manifest/catalog/meta request and must remain available when access is off.
+  if (/^\/stremio\/[^/]+\/configure\/?$/.test(req.path || '')) return next();
+  try {
+    const userUUID = decodeURIComponent(match[1]);
+    const config = await loadRouteConfig(userUUID);
+    if (config?.stremioAccessEnabled === false) {
+      return res.status(404).json({ error: 'Stremio access is disabled for this configuration' });
+    }
+    return next();
+  } catch (error) {
+    return next(error);
+  }
+});
+
 // --- Configuration Database API Routes ---
 addon.post("/api/config/save", configApi.saveConfig.bind(configApi));
 addon.post("/api/config/load/:userUUID", configLoadRateLimitMiddleware, configApi.loadConfig.bind(configApi));

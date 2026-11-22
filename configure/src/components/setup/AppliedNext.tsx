@@ -111,7 +111,9 @@ export function AppliedNext({
 
         {chosen && (
           <div className="space-y-3 rounded-xl border border-white/[0.06] bg-white/[0.02] p-4">
-            {saved && installUrl ? (
+            {chosen.id === 'stremio' && config.stremioAccessEnabled === false ? (
+              <p className="text-xs text-muted-foreground">Stremio access is disabled for this configuration.</p>
+            ) : saved && installUrl ? (
               <Button onClick={() => openInstall()} variant="outline" size="sm">
                 <Download className="mr-1.5 h-3.5 w-3.5" aria-hidden="true" />
                 Get the install link

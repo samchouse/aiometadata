@@ -511,7 +511,19 @@ export function ConfigurationManager() {
                   </Button>
                 </div>
               </div>
-              <div>
+              <div className="flex items-center justify-between gap-4 rounded-md border p-3">
+                <div className="space-y-1">
+                  <Label htmlFor="stremio-access-enabled" className="text-sm font-medium">Stremio access</Label>
+                  <p className="text-xs text-muted-foreground">Turn this off to block this configuration’s public Stremio routes. Jellyfin keeps working. Save to apply the change.</p>
+                </div>
+                <Switch
+                  id="stremio-access-enabled"
+                  checked={config.stremioAccessEnabled !== false}
+                  onCheckedChange={(enabled) => setConfig((prev) => ({ ...prev, stremioAccessEnabled: enabled }))}
+                  aria-label="Enable Stremio access for this configuration"
+                />
+              </div>
+              {config.stremioAccessEnabled !== false ? <div>
                 <Label className="text-sm font-medium">Install URL</Label>
                 {profileTags.length > 0 && (
                   <div className="flex flex-wrap items-center gap-1.5 mt-1.5">
@@ -593,7 +605,9 @@ export function ConfigurationManager() {
                     Search results rarely carry a rating, so expect search to return very little.
                   </p>
                 )}
-              </div>
+              </div> : (
+                <p className="text-sm text-muted-foreground">Stremio access is off. The install URL is hidden. Save to block public Stremio requests.</p>
+              )}
             </div>
             <InstallLinks userUUID={identity.userUUID} installUrl={identity.installUrl} />
             <Callout variant="info">
@@ -673,14 +687,18 @@ export function ConfigurationManager() {
                   </div>
                 </DialogContent>
               </Dialog>
-              <Button className="w-full sm:w-auto" onClick={() => openInstall(taggedInstallUrl)}>
-                <Download className="h-4 w-4 mr-2" /> Install
-              </Button>
-              <ManagerSync
-                baseInstallUrl={identity.installUrl}
-                currentProfileTags={selectedTags}
-                onSynced={() => { markManifestInstalled(); }}
-              />
+              {config.stremioAccessEnabled !== false ? (
+                <>
+                  <Button className="w-full sm:w-auto" onClick={() => openInstall(taggedInstallUrl)}>
+                    <Download className="h-4 w-4 mr-2" /> Install
+                  </Button>
+                  <ManagerSync
+                    baseInstallUrl={identity.installUrl}
+                    currentProfileTags={selectedTags}
+                    onSynced={() => { markManifestInstalled(); }}
+                  />
+                </>
+              ) : null}
             </div>
           </CardContent>
         </Card>
