@@ -697,6 +697,7 @@ function parseMedia(el, type, genreList = [], config = {}) {
     imdbRating: 'N/A',
     year: type === 'movie' ? (el.release_date?.substring(0, 4) || '') : (el.first_air_date?.substring(0, 4) || ''),
     type: type === 'movie' ? type : 'series',
+    ...(type !== 'movie' && el.status ? { status: String(el.status) } : {}),
     released: type === 'movie' ? new Date(el.release_date) : new Date(el.first_air_date),
     releaseInfo: type === 'movie'
       ? (el.release_date?.substring(0, 4) || '')

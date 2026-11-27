@@ -695,7 +695,7 @@ export async function assembleMdblist(data: MdblistData, config: any): Promise<R
   }
 
   const latest = new Map<string, { resolved: any; season: number; number: number; at: number }>();
-  const byShow = new Map<string, { metaIds: Set<string>; anime: boolean; regular: number }>();
+  const byShow = new Map<string, { metaIds: Set<string>; regular: number }>();
   const counted = new Set<any>();
   for (const { entry, ref } of watched) {
     if (!ref) continue;
@@ -711,18 +711,19 @@ export async function assembleMdblist(data: MdblistData, config: any): Promise<R
     if (seen) at.set(resolved.videoId, seen);
     recordWatch(history, { kind: 'episode', id: resolved.videoId, metaId: resolved.metaId, mediaType: resolved.mediaType, at: seen });
     const counts = series.get(resolved.metaId) ?? { watched: 0, total: 0 };
-    if (!counted.has(entry)) {
+    const firstCount = !counted.has(entry);
+    if (firstCount) {
       counted.add(entry);
       counts.watched += 1;
     }
     if (seen && (!counts.at || seen > counts.at)) counts.at = seen;
     series.set(resolved.metaId, counts);
-    if (ids.mdblist) {
-      const show = byShow.get(String(ids.mdblist)) ?? { metaIds: new Set<string>(), anime: false, regular: 0 };
+    const trackerShowId = ids.mdblist ?? ids.imdb ?? ids.tmdb;
+    if (trackerShowId) {
+      const show = byShow.get(String(trackerShowId)) ?? { metaIds: new Set<string>(), regular: 0 };
       show.metaIds.add(resolved.metaId);
-      if (resolved.mediaType === 'anime') show.anime = true;
-      if (season > 0) show.regular += 1;
-      byShow.set(String(ids.mdblist), show);
+      if (firstCount && season > 0) show.regular += 1;
+      byShow.set(String(trackerShowId), show);
     }
 
     const held = latest.get(resolved.metaId);
@@ -733,15 +734,20 @@ export async function assembleMdblist(data: MdblistData, config: any): Promise<R
 
   for (const entry of showRows) {
     const aired = Number(entry?.show?.total_aired_episodes) || 0;
-    const show = byShow.get(String(entry?.show?.ids?.mdblist ?? ''));
-    if (aired <= 0 || !show || show.anime || show.metaIds.size !== 1) continue;
-    const counts = series.get([...show.metaIds][0]);
-    if (counts) Object.assign(counts, { watched: show.regular, total: aired });
+    const ids = entry?.show?.ids ?? {};
+    const show = byShow.get(String(ids.mdblist ?? ids.imdb ?? ids.tmdb ?? ''));
+    if (aired <= 0 || !show) continue;
+    // MDBList's count is the show's aired episode count. Apply it to every
+    // metadata identity resolved for this same tracker show, including anime.
+    for (const metaId of show.metaIds) {
+      const counts = series.get(metaId);
+      if (counts) Object.assign(counts, { watched: show.regular, total: aired });
+    }
   }
 
-  // MDBList names the next episode itself, the one its own app shows. The
-  // history seeds it only when that call fails: the last episode watched, from
-  // which the shelf moves on.
+  // MDBList names each in-progress show's next episode. History also supplies
+  // a last-watched episode for shows absent from that list, including finished
+  // shows that the dashboard needs to report.
   const nextUp: NextUpRow[] = [];
   for (const [index, item] of upNext.entries()) {
     const ref = nextRefs[index];
@@ -765,17 +771,17 @@ export async function assembleMdblist(data: MdblistData, config: any): Promise<R
       trackerRank: index,
     });
   }
-  if (!upNext.length) {
-    for (const [metaId, { resolved, season, number, at }] of latest) {
-      nextUp.push({
-        metaId,
-        videoId: resolved.mediaType === 'anime' ? resolved.videoId : null,
-        season: resolved.mediaType === 'anime' ? null : season,
-        episode: resolved.mediaType === 'anime' ? Number(String(resolved.videoId).split(':').pop()) : number,
-        mediaType: resolved.mediaType,
-        lastWatchedAt: at,
-      });
-    }
+  const queuedShows = new Set(nextUp.map((row) => row.metaId));
+  for (const [metaId, { resolved, season, number, at }] of latest) {
+    if (queuedShows.has(metaId)) continue;
+    nextUp.push({
+      metaId,
+      videoId: resolved.mediaType === 'anime' ? resolved.videoId : null,
+      season: resolved.mediaType === 'anime' ? null : season,
+      episode: resolved.mediaType === 'anime' ? Number(String(resolved.videoId).split(':').pop()) : number,
+      mediaType: resolved.mediaType,
+      lastWatchedAt: at,
+    });
   }
 
   const dropped = new Set<string>();

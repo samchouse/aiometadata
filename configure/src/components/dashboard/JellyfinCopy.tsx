@@ -39,16 +39,28 @@ function markLine(t: JellyfinCopyTitle, what: JellyfinCopyWhat): string {
   return `${kind}${value}${date}`;
 }
 
-function Side({ label, lane, lanes, onPick, accent }: { label: string; lane: JellyfinSyncLane | undefined; lanes: JellyfinSyncLane[]; onPick: (key: string) => void; accent?: boolean }) {
+function Side({ label, lane, lanes, onPick, accent, emptyLabel }: { label: string; lane: JellyfinSyncLane | undefined; lanes: JellyfinSyncLane[]; onPick: (key: string) => void; accent?: boolean; emptyLabel?: string }) {
   const trackers = useTrackers();
+  const buttonStyle = cx("flex min-w-0 flex-1 items-center gap-4 rounded-2xl border p-4 text-left transition-colors", accent ? "border-blue-400/40 bg-gradient-to-r from-blue-500/[0.1] to-transparent" : "border-white/[0.09] bg-white/[0.03]");
+  if (!lanes.length) {
+    return (
+      <div aria-disabled="true" className={cx(buttonStyle, "cursor-not-allowed opacity-70")}>
+        <span className="size-12 shrink-0 rounded-xl bg-white/5" />
+        <span className="min-w-0 flex-1">
+          <span className={cx("block text-[11px] font-medium uppercase tracking-[0.14em]", accent ? "text-blue-300" : "text-muted-foreground")}>{label}</span>
+          <span className="block truncate text-lg font-bold">{emptyLabel ?? "No compatible choice"}</span>
+        </span>
+      </div>
+    );
+  }
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button type="button" className={cx("flex min-w-0 flex-1 items-center gap-4 rounded-2xl border p-4 text-left transition-colors hover:bg-white/[0.05]", accent ? "border-blue-400/40 bg-gradient-to-r from-blue-500/[0.1] to-transparent" : "border-white/[0.09] bg-white/[0.03]")}>
+        <button type="button" className={cx(buttonStyle, "hover:bg-white/[0.05]")}>
           {lane ? <Logo service={lane.service} size={48} /> : <span className="size-12 rounded-xl bg-white/5" />}
           <span className="min-w-0 flex-1">
             <span className={cx("block text-[11px] font-medium uppercase tracking-[0.14em]", accent ? "text-blue-300" : "text-muted-foreground")}>{label}</span>
-            <span className="block truncate text-lg font-bold">{lane ? trackers.name(lane.service) : "Pick a tracker"}</span>
+            <span className="block truncate text-lg font-bold">{lane ? trackers.name(lane.service) : emptyLabel ?? "Pick a tracker"}</span>
             {lane && lane.profiles.length > 0 && <span className="block truncate text-xs text-muted-foreground">{lane.profiles.join(", ")} · {lane.service === HERE ? "on this server" : `read ${lane.syncedAt ? when(lane.syncedAt) : "never"}`}</span>}
           </span>
           <ChevronDown className="size-4 shrink-0 text-muted-foreground" />
@@ -118,15 +130,16 @@ export default function JellyfinCopy({ userUUID, profile, lanes, activeTab, init
   const [retry, setRetry] = useState(false);
   const trackers = useTrackers();
   const sources = useMemo(() => lanes.filter((lane) => trackers.copiesFrom(lane.service, what)), [lanes, trackers, what]);
-  const firstSource = lanes.find((lane) => trackers.copiesFrom(lane.service, "watches"))?.key;
+  const firstSource = lanes.find((lane) => trackers.copiesFrom(lane.service, what))?.key;
   const [from, setFrom] = useState<string>(initial?.from ?? firstSource ?? "");
-  const [to, setTo] = useState<string>(initial?.to ?? lanes.find((lane) => lane.key !== (initial?.from ?? firstSource))?.key ?? "");
   // The history here is filled for the profiles the source tracker is read for.
   const targets = useMemo(() => {
     const listed = lanes.filter((lane) => trackers.copiesTo(lane.service, what));
     const source = lanes.find((lane) => lane.key === from);
     return source && trackers.copiesTo(HERE, what) ? [...listed, { ...source, key: HERE, service: HERE }] : listed;
   }, [lanes, trackers, what, from]);
+  const [to, setTo] = useState<string>(initial?.to ?? targets.find((lane) => lane.key !== from)?.key ?? "");
+  const availableTargets = useMemo(() => targets.filter((lane) => lane.key !== from), [targets, from]);
   const [range, setRange] = useState<Range>("all");
   const [sinceDay, setSinceDay] = useState(() => new Date(Date.now() - 365 * 86_400_000).toISOString().slice(0, 10));
   const [preview, setPreview] = useState<JellyfinCopyPreview | null>(null);
@@ -152,8 +165,8 @@ export default function JellyfinCopy({ userUUID, profile, lanes, activeTab, init
 
   useEffect(() => {
     if (!sources.some((lane) => lane.key === from)) setFrom(sources.find((lane) => lane.key !== to)?.key ?? sources[0]?.key ?? "");
-    if (!targets.some((lane) => lane.key === to)) setTo(targets.find((lane) => lane.key !== from)?.key ?? "");
-  }, [sources, targets, from, to]);
+    if (!targets.some((lane) => lane.key === to) || to === from) setTo(availableTargets[0]?.key ?? "");
+  }, [sources, targets, availableTargets, from, to]);
 
   useEffect(() => {
     if (!live) return;
@@ -247,8 +260,6 @@ export default function JellyfinCopy({ userUUID, profile, lanes, activeTab, init
     }
   };
 
-  if (!lanes.some((lane) => trackers.copiesFrom(lane.service, "watches"))) return <p className="text-sm text-muted-foreground">Copying starts from {orList(trackers.list.filter((tracker) => tracker.datedHistory).map((tracker) => tracker.name))}; connect one to copy its history to another tracker.</p>;
-
   const running = jobs.filter((job) => job.status === "running" || job.status === "paused");
   const recent = jobs.filter((job) => !running.includes(job)).slice(0, 3);
 
@@ -257,11 +268,11 @@ export default function JellyfinCopy({ userUUID, profile, lanes, activeTab, init
       {running.map((job) => <JobCard key={job.id} job={job} onControl={(id, action) => void control(id, action)} />)}
 
       <div className="grid grid-cols-1 items-center gap-3 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)]">
-        <Side label="From" lane={fromLane} lanes={sources.filter((lane) => lane.key !== to)} onPick={setFrom} />
+        <Side label="From" lane={fromLane} lanes={sources.filter((lane) => lane.key !== to)} onPick={setFrom} emptyLabel="No compatible source" />
         <button type="button" onClick={swap} disabled={!swappable} aria-label="Swap from and to" title={swappable ? "Swap" : `${toName} can only be copied to`} className="mx-auto flex size-12 items-center justify-center rounded-full border border-blue-400/30 bg-blue-500/10 text-blue-200 transition hover:bg-blue-500/20 disabled:opacity-40">
           <ArrowLeftRight className="size-4" />
         </button>
-        <Side label="To" lane={toLane} lanes={targets.filter((lane) => lane.key !== from)} onPick={setTo} accent />
+        <Side label="To" lane={toLane} lanes={availableTargets} onPick={setTo} accent emptyLabel="No compatible destination" />
       </div>
 
       <div className="flex flex-wrap items-center gap-3">
@@ -280,7 +291,24 @@ export default function JellyfinCopy({ userUUID, profile, lanes, activeTab, init
         {busy ? (
           <p className="text-sm text-muted-foreground">{busy.status === "paused" ? "A copy" : "Copying"} from {fromName} to {toInline}{busy.status === "paused" ? " is paused" : ""}, see the progress above. The comparison comes back when it's done.</p>
         ) : !sources.length ? (
-          <p className="text-sm text-muted-foreground">{what === "ratings" ? "Ratings copy from MDBList or Simkl. PublicMetaDB has no way to list the ratings you've given." : "Connect MDBList, Simkl or PublicMetaDB to copy from."}</p>
+          <p className="text-sm text-muted-foreground">
+            {what === "watches"
+              ? `Connect ${orList(trackers.list.filter((tracker) => tracker.datedHistory).map((tracker) => tracker.name)) || "a tracker with dated watch history"} to copy watches.`
+              : `No connected tracker can provide a ${what === "watchlist" ? "watchlist" : what === "ratings" ? "ratings list" : "dropped shows list"} for copying. Connect ${orList(trackers.list.filter((tracker) => tracker.marks.from.includes(what)).map((tracker) => tracker.name)) || "a tracker that supports it"}.`}
+          </p>
+        ) : !toLane ? (
+          <div className="space-y-1">
+            <p className="text-sm font-semibold text-foreground">{what === "watchlist" ? "Watchlist copy needs another tracker" : what === "ratings" ? "Ratings copy needs another tracker" : what === "dropped" ? "Dropped show copy needs another tracker" : "Connect a destination tracker"}</p>
+            <p className="text-sm text-muted-foreground">
+              {what === "watchlist"
+                ? "Local Jellyfin does not provide a separate watchlist destination here. Connect another compatible tracker to copy between services, or use the Server Watchlist Import in Jellyfin settings to keep a permanent server copy."
+                : what === "ratings"
+                  ? "Ratings can be copied between compatible trackers. Local Jellyfin history does not store tracker ratings."
+                  : what === "dropped"
+                    ? "Dropped shows can be copied between compatible trackers. Local Jellyfin history does not store tracker dropped status."
+                    : "Connect another tracker that can receive this history, or choose a different source."}
+            </p>
+          </div>
         ) : failure ? (
           <p className="text-sm text-red-300">{failure}</p>
         ) : comparing || !preview ? (

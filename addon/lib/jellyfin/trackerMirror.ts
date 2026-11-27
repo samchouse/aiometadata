@@ -199,7 +199,7 @@ async function syncSimkl(key: string, tokenId: string, config: any, watermark: a
 // --- MDBList ------------------------------------------------------------------------
 
 const MDBLIST_WATCH_FIELDS = ['watched_at', 'season_watched_at', 'episode_watched_at', 'journal_at'];
-const MDBLIST_MIRROR_FORMAT = 4;
+const MDBLIST_MIRROR_FORMAT = 5;
 const MDBLIST_OLD_LIMIT = 50_000;
 const PMDB_OLD_LIMIT = 25_000;
 
@@ -212,13 +212,17 @@ async function heldByKind(key: string): Promise<Map<string, number>> {
   return out;
 }
 
+function mdblistId(ids: any): string | number | undefined {
+  return ids?.mdblist ?? ids?.imdb ?? ids?.tmdb;
+}
+
 function mdblistMovieRow(entry: any): MirrorRow | null {
-  const id = entry?.movie?.ids?.mdblist;
+  const id = mdblistId(entry?.movie?.ids);
   return id ? { key: `movie:${id}`, group: `movie:${id}`, data: entry } : null;
 }
 
 function mdblistEpisodeRow(entry: any): MirrorRow | null {
-  const show = entry?.episode?.show?.ids?.mdblist;
+  const show = mdblistId(entry?.episode?.show?.ids);
   const season = entry?.episode?.season;
   const number = entry?.episode?.number;
   if (!show || season === undefined || number === undefined) return null;
@@ -227,7 +231,7 @@ function mdblistEpisodeRow(entry: any): MirrorRow | null {
 
 // A watched show, for its aired episode count.
 function mdblistShowRow(entry: any): MirrorRow | null {
-  const id = entry?.show?.ids?.mdblist;
+  const id = mdblistId(entry?.show?.ids);
   return id ? { key: `showinfo:${id}`, group: `show:${id}`, data: entry } : null;
 }
 
@@ -306,7 +310,7 @@ async function journalRows(key: string, rows: any[], apiKey: string): Promise<Mi
   };
   const out: MirrorRow[] = [];
   for (const row of rows) {
-    const id = row?.ids?.mdblist;
+    const id = mdblistId(row?.ids);
     if (!id) continue;
     if (row.item_type === 'movie') {
       const group = `movie:${id}`;
@@ -393,7 +397,7 @@ async function syncMdblist(key: string, apiKey: string, watermark: any, fresh = 
 
     // A season or show is journaled as removed when it stops being complete.
     for (const row of removals) {
-      const show = row?.ids?.mdblist;
+      const show = mdblistId(row?.ids);
       if (!show) continue;
       if (row.item_type === 'movie') await database.deleteTrackerMirror(key, [`movie:${show}`]);
       else if (row.item_type === 'episode') await database.deleteTrackerMirror(key, [`ep:${show}:${row.season}:${row.episode}`]);

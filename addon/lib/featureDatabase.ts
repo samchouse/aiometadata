@@ -223,28 +223,43 @@ export class FeatureDatabase extends DatabaseCore {
     return { moved, latestBefore: latestOf(before), latestAfter: latestOf(after), apart };
   }
 
-  /** Takes back the viewing nearest `at` in every spelling, never a title's last one, and dates the title by the latest left. */
+  /** Takes back the viewing nearest `at` across all spellings, never the title's last one. */
   async removeWatch(userUUID: string, profile: string, videoIds: string[], at: number, withinMs: number): Promise<{ removed: number; latestBefore: number | null; latestAfter: number | null }> {
     const sqlite = this.type === 'sqlite';
     const ids = [...new Set(videoIds)];
     const latestOf = (rows: Array<{ watched_at: number }>) => (rows.length ? Math.max(...rows.map((row) => row.watched_at)) : null);
     const before = await this.listWatchesFor(userUUID, profile, ids, true);
-    const viewings = Math.max(0, ...ids.map((id) => before.filter((row) => row.video_id === id).length));
-    if (viewings < 2) return { removed: 0, latestBefore: latestOf(before), latestAfter: latestOf(before) };
+    const gap = Math.max(0, Math.round(withinMs));
+    const groups: Array<{ times: Set<number>; last: number }> = [];
+    for (const watchedAt of [...new Set(before.map((row) => row.watched_at))].sort((a, b) => a - b)) {
+      const last = groups[groups.length - 1];
+      if (!last || watchedAt - last.last >= gap) groups.push({ times: new Set([watchedAt]), last: watchedAt });
+      else {
+        last.times.add(watchedAt);
+      }
+    }
+    const latestBefore = latestOf(before);
+    if (groups.length < 2) return { removed: 0, latestBefore, latestAfter: latestBefore };
+    const selected = groups
+      .map((group) => ({ group, distance: Math.min(...[...group.times].map((time) => Math.abs(time - at))) }))
+      .sort((a, b) => a.distance - b.distance)[0];
+    if (!selected || selected.distance > gap) return { removed: 0, latestBefore, latestAfter: latestBefore };
     let removed = 0;
     for (const id of ids) {
-      const pick = before
-        .filter((row) => row.video_id === id && Math.abs(row.watched_at - at) <= withinMs)
-        .sort((a, b) => Math.abs(a.watched_at - at) - Math.abs(b.watched_at - at))[0];
-      if (!pick) continue;
-      const result = await this.runQuery(
-        sqlite
-          ? 'DELETE FROM jellyfin_watches WHERE user_uuid = ? AND profile = ? AND video_id = ? AND watched_at = ?'
-          : 'DELETE FROM jellyfin_watches WHERE user_uuid = $1 AND profile = $2 AND video_id = $3 AND watched_at = $4',
-        [userUUID, profile, id, pick.watched_at]
-      );
-      if (Number(result?.changes ?? result?.rowCount ?? 0) === 0) continue;
-      removed += 1;
+      const pick = before.filter((row) => row.video_id === id && selected.group.times.has(row.watched_at));
+      if (!pick.length) continue;
+      let removedForId = 0;
+      for (const row of pick) {
+        const result = await this.runQuery(
+          sqlite
+            ? 'DELETE FROM jellyfin_watches WHERE user_uuid = ? AND profile = ? AND video_id = ? AND watched_at = ?'
+            : 'DELETE FROM jellyfin_watches WHERE user_uuid = $1 AND profile = $2 AND video_id = $3 AND watched_at = $4',
+          [userUUID, profile, id, row.watched_at]
+        );
+        removedForId += Number(result?.changes ?? result?.rowCount ?? 0);
+      }
+      if (!removedForId) continue;
+      removed += removedForId;
       await this.runQuery(
         sqlite
           ? 'UPDATE jellyfin_playstate SET play_count = MAX(play_count - 1, 1) WHERE user_uuid = ? AND profile = ? AND video_id = ? AND played = 1'
@@ -255,8 +270,8 @@ export class FeatureDatabase extends DatabaseCore {
     const after = removed ? await this.listWatchesFor(userUUID, profile, ids, true) : before;
     if (removed) {
       const now = Date.now();
+      const latest = latestOf(after);
       for (const id of ids) {
-        const latest = latestOf(after.filter((row) => row.video_id === id));
         if (latest === null) continue;
         await this.runQuery(
           sqlite

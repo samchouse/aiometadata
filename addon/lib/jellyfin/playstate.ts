@@ -951,9 +951,11 @@ export async function recordWatchRemoval(req: any, itemId: string, at: number): 
   const profile = profileKey(config);
   const spellings = [session.videoId, ...session.aliases, ...(await videoIdAliases(session.videoId, config).catch(() => [] as string[]))];
   const runtimeMs = session.runtimeMs ?? 0;
-  const sameViewing = runtimeMs > 0 ? runtimeMs : envInt('JELLYFIN_REWATCH_MIN_GAP_MINUTES', 10, 0) * 60_000;
+  // Match the title history's rewatch grouping so a viewing shown there can
+  // also be selected for removal here.
+  const sameViewing = rewatchGapMs(runtimeMs);
   const database: any = require('../database');
-  const { removed, latestBefore, latestAfter } = await database.removeWatch(userUUID, profile, spellings, at, Math.max(sameViewing, 60_000));
+  const { removed, latestBefore, latestAfter } = await database.removeWatch(userUUID, profile, spellings, at, sameViewing);
   if (!removed) return false;
 
   const { invalidateResume } = require('./resume');

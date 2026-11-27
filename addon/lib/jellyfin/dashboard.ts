@@ -1564,6 +1564,12 @@ async function readShows(userUUID: string, profile: string | null): Promise<{ ro
         ?? (await withDeadline(seriesIndex(userUUID, row.metaId).catch(() => null)));
       const ended = step.outcome === 'caught-up'
         && seriesStatus((await withDeadline(fetchMeta(userUUID, 'series', String(meta?.id ?? row.metaId)).catch(() => null))) ?? {}) === 'Ended';
+      const watched = Number(step.watched) || 0;
+      const total = Number(step.total) || 0;
+      // In this dashboard, Finished describes the user's watch progress: all
+      // aired episodes are watched. Whether the series itself is renewed is a
+      // separate fact and must not leave a complete watch run in Waiting.
+      const completed = step.outcome === 'caught-up' && total > 0 && watched >= total;
       return {
         metaId: String(meta?.id ?? row.metaId),
         title: meta?.name ?? row.metaId,
@@ -1571,7 +1577,11 @@ async function readShows(userUUID: string, profile: string | null): Promise<{ ro
         backdropUrl: meta?.background ?? null,
         source,
         lastWatchedAt: Number(row.lastWatchedAt) || null,
-        outcome: !ended ? step.outcome : step.total && (step.watched ?? 0) < step.total ? 'unfinished' : 'finished',
+        outcome: completed || (ended && (!total || watched >= total))
+          ? 'finished'
+          : ended && total > watched
+            ? 'unfinished'
+            : step.outcome,
         next: step.next ?? null,
         from: step.from ?? null,
         last: row.episode !== undefined && row.episode !== null ? { season: row.season ?? null, number: row.episode } : null,
